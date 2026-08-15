@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="CacheAnalyzer.AspNetCore/CacheAnalyzer.AspNetCore.csproj" />
+  <Project Path="CacheAnalyzer.Core/CacheAnalyzer.Core.csproj" />
+  <Project Path="CacheAnalyzerHelper.Tests/CacheAnalyzerHelper.Tests.csproj" />
+  <Project Path="CacheAnalyzerHelper/CacheAnalyzerHelper.csproj" />
+</Solution>

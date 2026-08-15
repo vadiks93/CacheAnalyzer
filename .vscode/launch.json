@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": ".NET: Debug woven test code (LamaDebug)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzerHelper.Tests (LamaDebug)",
+      "program": "${workspaceFolder}/CacheAnalyzerHelper.Tests/bin/LamaDebug/net10.0/CacheAnalyzerHelper.Tests.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/CacheAnalyzerHelper.Tests",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false
+    },
+    {
+      "name": ".NET: Debug CacheAnalyzerHelper.Tests",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzerHelper.Tests",
+      "program": "${workspaceFolder}/CacheAnalyzerHelper.Tests/bin/Debug/net10.0/CacheAnalyzerHelper.Tests.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/CacheAnalyzerHelper.Tests",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false
+    }
+  ]
+}
