@@ -2,9 +2,9 @@ using CacheAnalyzer.Core;
 using CacheAnalyzerHelper;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Primitives;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 namespace CacheAnalyzer.AspNetCore;
 
@@ -33,6 +33,7 @@ public sealed class CacheAnalyzerMiddleware
             return;
         }
 
+        var requestKey = await CreateRequestKeyAsync(context.Request);
         var originalBody = context.Response.Body;
 
         await using var bufferedBody = new MemoryStream();
@@ -42,14 +43,13 @@ public sealed class CacheAnalyzerMiddleware
         {
             await _next(context);
 
-            if (!CanReturnCachedResult(context.Response))
+            if (!CanAnalyzeResponse(context.Response))
             {
                 await CopyResponseAsync(bufferedBody, originalBody);
                 return;
             }
 
             var responseBytes = bufferedBody.ToArray();
-            var requestKey = CreateRequestKey(context.Request);
 
             if (responseBytes.LongLength > options.MaximumPayloadBytes)
             {
@@ -67,7 +67,7 @@ public sealed class CacheAnalyzerMiddleware
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var etag = fingerprintProvider.CreateFingerprint(responseBytes);
+            var fingerprint = fingerprintProvider.CreateFingerprint(responseBytes);
             stopwatch.Stop();
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
@@ -80,14 +80,14 @@ public sealed class CacheAnalyzerMiddleware
                         CacheRecommendation.FingerprintTooSlow,
                         responseBytes.LongLength,
                         stopwatch.Elapsed,
-                        etag));
+                        fingerprint));
                 await originalBody.WriteAsync(responseBytes, context.RequestAborted);
                 return;
             }
 
             var historyResult = history.Observe(
                 requestKey,
-                etag,
+                fingerprint,
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
                 options);
@@ -99,20 +99,9 @@ public sealed class CacheAnalyzerMiddleware
                     historyResult.Recommendation,
                     responseBytes.LongLength,
                     stopwatch.Elapsed,
-                    etag,
+                    fingerprint,
                     historyResult.TrackingCapacityReached));
 
-            context.Response.Headers.ETag = etag;
-
-            if (Matches(context.Request.Headers.IfNoneMatch, etag))
-            {
-                context.Response.StatusCode = StatusCodes.Status304NotModified;
-                context.Response.ContentLength = null;
-                context.Response.Headers.Remove("Content-Type");
-                return;
-            }
-
-            context.Response.ContentLength = responseBytes.Length;
             await originalBody.WriteAsync(responseBytes, context.RequestAborted);
         }
         finally
@@ -121,10 +110,34 @@ public sealed class CacheAnalyzerMiddleware
         }
     }
 
-    private static string CreateRequestKey(HttpRequest request)
+    private static async Task<string> CreateRequestKeyAsync(HttpRequest request)
     {
-        return $"{request.Method} {request.Scheme}://{request.Host}{request.PathBase}{request.Path}{request.QueryString}";
+        var key = $"{request.Method} {request.Scheme}://{request.Host}{request.PathBase}{request.Path}{request.QueryString}";
+        if (!IsQuery(request.Method))
+        {
+            return key;
+        }
+
+        request.EnableBuffering();
+        var position = request.Body.Position;
+        try
+        {
+            var hash = await SHA256.HashDataAsync(request.Body, request.HttpContext.RequestAborted);
+            return key + " QUERY " + System.Text.Json.JsonSerializer.Serialize(new[]
+            {
+                request.ContentType,
+                request.Headers.ContentEncoding.ToString(),
+                request.Headers.ContentLanguage.ToString(),
+                Convert.ToHexString(hash)
+            });
+        }
+        finally
+        {
+            request.Body.Position = position;
+        }
     }
+
+    private static bool IsQuery(string method) => string.Equals(method, "QUERY", StringComparison.Ordinal);
 
     private static void Report(
         IEnumerable<IResponseAnalysisSink> sinks,
@@ -147,40 +160,23 @@ public sealed class CacheAnalyzerMiddleware
     private static bool ShouldAnalyze(HttpContext context, CacheAnalysisOptions options)
     {
         var method = context.Request.Method;
-        var isCacheableMethod = HttpMethods.IsGet(method) || HttpMethods.IsHead(method);
+        var isCacheableMethod = HttpMethods.IsGet(method) || IsQuery(method);
 
         if (!isCacheableMethod)
         {
             return false;
         }
 
-        return options.EndpointSelection == EndpointSelectionMode.AllGetAndHeadRequests ||
+        return options.EndpointSelection == EndpointSelectionMode.AllGetAndQueryRequests ||
                context.GetEndpoint()?.Metadata.GetMetadata<CacheAnalyzeAttribute>() is not null;
     }
 
-    private static bool CanReturnCachedResult(HttpResponse response)
+    private static bool CanAnalyzeResponse(HttpResponse response)
     {
         return response.StatusCode >= StatusCodes.Status200OK &&
                response.StatusCode < StatusCodes.Status300MultipleChoices &&
                !response.Headers.CacheControl.Any(
                    value => value?.Contains("no-store", StringComparison.OrdinalIgnoreCase) == true);
-    }
-
-    private static bool Matches(StringValues candidates, string etag)
-    {
-        foreach (var header in candidates)
-        {
-            foreach (var candidate in header?.Split(',') ?? Array.Empty<string>())
-            {
-                var value = candidate.Trim();
-                if (value == "*" || string.Equals(value, etag, StringComparison.Ordinal))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     private static async Task CopyResponseAsync(Stream source, Stream destination)

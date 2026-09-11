@@ -1,0 +1,30 @@
+@baseUrl = http://localhost:5080
+@etag = *
+
+### Stable response: repeat three times and check the server console
+GET {{baseUrl}}/api/products
+
+### Conditional header does not change the response: expect 200 and the full body
+GET {{baseUrl}}/api/products
+If-None-Match: {{etag}}
+
+### QUERY with a request body
+QUERY {{baseUrl}}/api/products/search
+Content-Type: application/json
+
+{"maxPrice":100}
+
+### Different query, separate analysis history
+QUERY {{baseUrl}}/api/products/search
+Content-Type: application/json
+
+{"maxPrice":300}
+
+### Changing response
+GET {{baseUrl}}/api/live
+
+### Unanalyzed endpoint
+GET {{baseUrl}}/health
+
+### Excluded HTTP method
+HEAD {{baseUrl}}/api/products

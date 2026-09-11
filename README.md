@@ -9,15 +9,17 @@ The initial version supports inbound ASP.NET Core requests handled by:
 - MVC and API controllers
 - Minimal API endpoints
 
-It analyzes newly generated responses produced by these server endpoints, reports caching opportunities, emits ETags when analysis is suitable, and handles conditional `304 Not Modified` responses. It does not store endpoint response bodies or use ASP.NET Core Output Caching.
+It analyzes newly generated responses and reports caching opportunities without adding response headers, changing status codes, or modifying payloads. Fingerprints stay internal: no ETags are emitted and no conditional responses are generated. It does not cache endpoint response bodies or use ASP.NET Core Output Caching.
 
 Outbound `HttpClient`, typed API-client, and internal service-call analysis are not part of the initial scope. These integrations may be considered later without changing the core response-analysis contracts.
 
 ## Projects
 
+Runnable ASP.NET Core (.NET 10) and .NET Framework 4.8 Web API samples, request examples, and smoke checks are in [samples](samples/README.md).
+
 - `CacheAnalyzer.Core` targets `netstandard2.0` and owns response fingerprinting.
 - `CacheAnalyzerHelper` contains the Metalama `[CacheAnalyzer]` method marker.
-- `CacheAnalyzer.AspNetCore` translates matching HTTP ETags into `304 Not Modified`.
+- `CacheAnalyzer.AspNetCore` observes eligible HTTP responses and reports analysis through configured sinks.
 
 ## ASP.NET Core setup
 
@@ -32,7 +34,8 @@ builder.Services.AddCacheAnalyzer(options =>
     options.EndpointSelection = EndpointSelectionMode.AttributedEndpoints;
     options.MaximumPayloadBytes = 1024 * 1024;
     options.MaximumFingerprintDuration = TimeSpan.FromMilliseconds(25);
-    options.MaximumTrackedRequests = 1_000;
+    options.MaximumDistinctRequestKeys = 200;
+    options.MaximumObservationsPerKey = 1_000;
     options.MinimumObservations = 10;
     options.ObservationWindow = TimeSpan.FromHours(1);
     options.MinimumPayloadToFingerprintRatio = 10;
@@ -54,7 +57,9 @@ Place the middleware after routing so endpoint metadata is available. Mark GET e
 public Product Get(int id) => repository.Get(id);
 ```
 
-Use `EndpointSelectionMode.AttributedEndpoints` for one-by-one opt-in through `[CacheAnalyze]`, or `EndpointSelectionMode.AllGetAndHeadRequests` to analyze every GET and HEAD endpoint.
+Use `EndpointSelectionMode.AttributedEndpoints` for one-by-one opt-in through `[CacheAnalyze]`, or `EndpointSelectionMode.AllGetAndQueryRequests` to analyze every GET and QUERY endpoint.
+
+HEAD and other methods bypass analysis. QUERY analysis keys include a SHA-256 hash of the request body plus its content type, encoding, and language so different queries at the same URL have separate histories. The request body is buffered and rewound before the endpoint runs.
 
 `Enabled` can be supplied through reloadable configuration using the standard options system. The behavior can also be stopped immediately at runtime; disabled requests bypass response buffering and hashing:
 
@@ -83,11 +88,17 @@ control.Disable();
 control.Enable();
 ```
 
-Every eligible tagged response returns an `ETag`; clients that do not support validation can ignore it. The first request returns `200 OK` with both the response payload and the ETag header. When a later request sends that value in `If-None-Match`, CacheAnalyzer executes the endpoint again and hashes the newly generated response. If it is unchanged, CacheAnalyzer returns `304` without a response body; otherwise it returns `200 OK` with the new payload and ETag.
+Analysis runs independently of client conditional headers. The API retains ownership of its status, headers, and complete body, including any existing ETag or 304 behavior. A response becomes a cache candidate when enough retained observations match and the payload is sufficiently larger than its internal fingerprint. Oversized payloads and slow fingerprint generation are reported without affecting the response.
 
-Analysis runs even when the request does not contain `If-None-Match`. A response becomes a cache candidate only when the same request produces enough identical responses inside the configured observation window and its payload is sufficiently larger than its ETag. Large payloads are not hashed, and responses whose fingerprint takes longer than the configured threshold do not receive an ETag.
+The current adapter buffers responses before forwarding them and buffers QUERY input to calculate a key. This adds memory and latency overhead; MaximumPayloadBytes limits hashing, not response buffering. Streaming, explicit flush/start operations, and custom body features need further compatibility work before enabling analysis broadly. Prefer endpoint opt-in for ordinary buffered APIs.
 
-The in-memory tracker has a fixed capacity. Once full, it continues updating known request keys but does not admit new keys. A rejected key is reported with `TrackingCapacityReached = true` while its cache recommendation remains `InsufficientTraffic`. The tracker stores append-only fingerprint observations inside the configured window, never response bodies, and does not lock request processing.
+The in-memory tracker defaults to 200 distinct request keys (`MaximumDistinctRequestKeys`, formerly `MaximumTrackedRequests`) and 1,000 observations per key (`MaximumObservationsPerKey`). Once the key table is full, it continues updating known keys but does not admit new keys. A rejected key is reported with `TrackingCapacityReached = true` while its recommendation remains `InsufficientTraffic`. Keys are not automatically evicted.
+
+Each observation prunes expired queue-head entries and oldest excess entries. Analysis uses a capped snapshot filtered to the observation window, including when timestamps arrive out of order. A cache candidate requires enough snapshot entries, all matching the current fingerprint, and a useful payload-to-fingerprint ratio. Set `MaximumObservationsPerKey` to a positive value at least as large as `MinimumObservations`. Response bodies are never stored in history.
+
+No application-level locks are used: concurrent queues and snapshots deliberately provide approximate analysis. Concurrent admission can exceed the distinct-key limit; concurrent queue updates can temporarily exceed the observation limit or discard extra entries. The default retention target is 200,000 observations, not a strict concurrent ceiling. Expired entries behind a newer queue head are excluded from analysis and reclaimed as the queue advances. Lowering the key limit does not evict existing keys; a changed observation limit applies when a key is next observed.
+
+The repository's [no-locking rule](AGENTS.md) prohibits adding locks or equivalent serialization for exact analysis consistency. Built-in concurrent collections are allowed, but may synchronize internally; this is not a claim that every operation is formally lock-free.
 
 Add any number of custom reporting integrations through dependency injection:
 
@@ -107,4 +118,4 @@ public sealed class SplunkResponseAnalysisSink : IResponseAnalysisSink
 }
 ```
 
-This implementation saves response bandwidth, but it deliberately does not cache backend endpoint responses or avoid endpoint execution.
+This utility identifies opportunities to add caching elsewhere. It does not itself save response bandwidth, cache responses, or avoid endpoint execution.

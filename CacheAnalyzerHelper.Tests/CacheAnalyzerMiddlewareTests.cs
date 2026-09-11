@@ -12,38 +12,52 @@ public sealed class CacheAnalyzerMiddlewareTests
 {
     private const string ResponseJson = "{\"id\":42,\"name\":\"cached value\"}";
 
-    [Fact]
-    public async Task TaggedGet_AddsETagAndReturnsResponse()
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("QUERY")]
+    public async Task TaggedSupportedMethod_ReportsWithoutAlteringResponse(string method)
     {
         var context = CreateContext();
+        context.Request.Method = method;
         var middleware = CreateMiddleware();
 
-        await InvokeAsync(middleware, context);
+        var sink = new CollectingSink();
+        await InvokeAsync(middleware, context, sinks: [sink]);
 
         Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
-        Assert.False(string.IsNullOrWhiteSpace(context.Response.Headers.ETag));
+        Assert.False(context.Response.Headers.ContainsKey("ETag"));
+        Assert.Null(context.Response.ContentLength);
+        Assert.Equal("application/json", context.Response.ContentType);
+        Assert.Single(sink.Analyses);
         Assert.Equal(ResponseJson, ReadBody(context));
     }
 
-    [Fact]
-    public async Task TaggedConditionalGet_WithMatchingETag_Returns304WithoutBody()
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("QUERY")]
+    public async Task TaggedConditionalRequest_WithMatchingFingerprint_ReturnsOriginalBody(string method)
     {
         var provider = new Sha256ResponseFingerprintProvider();
         var etag = provider.CreateFingerprint(Encoding.UTF8.GetBytes(ResponseJson));
         var context = CreateContext(etag);
+        context.Request.Method = method;
         var middleware = CreateMiddleware();
 
         await InvokeAsync(middleware, context, provider);
 
-        Assert.Equal(StatusCodes.Status304NotModified, context.Response.StatusCode);
-        Assert.Equal(etag, context.Response.Headers.ETag);
-        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.False(context.Response.Headers.ContainsKey("ETag"));
+        Assert.Equal("application/json", context.Response.ContentType);
+        Assert.Equal(ResponseJson, ReadBody(context));
     }
 
-    [Fact]
-    public async Task UntaggedGet_DoesNotAddETag()
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("QUERY")]
+    public async Task UntaggedSupportedMethod_DoesNotAddETag(string method)
     {
         var context = CreateContext(tagged: false);
+        context.Request.Method = method;
         var middleware = CreateMiddleware();
 
         await InvokeAsync(middleware, context);
@@ -52,18 +66,23 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(ResponseJson, ReadBody(context));
     }
 
-    [Fact]
-    public async Task AllGetMode_AnalyzesUntaggedGet()
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("QUERY")]
+    public async Task AllGetAndQueryMode_AnalyzesUntaggedRequest(string method)
     {
         var context = CreateContext(tagged: false);
+        context.Request.Method = method;
         var options = new CacheAnalysisOptions
         {
-            EndpointSelection = EndpointSelectionMode.AllGetAndHeadRequests
+            EndpointSelection = EndpointSelectionMode.AllGetAndQueryRequests
         };
 
-        await InvokeAsync(CreateMiddleware(), context, options: options);
+        var sink = new CollectingSink();
+        await InvokeAsync(CreateMiddleware(), context, options: options, sinks: [sink]);
 
-        Assert.False(string.IsNullOrWhiteSpace(context.Response.Headers.ETag));
+        Assert.Single(sink.Analyses);
+        Assert.False(context.Response.Headers.ContainsKey("ETag"));
     }
 
     [Fact]
@@ -84,16 +103,19 @@ public sealed class CacheAnalyzerMiddlewareTests
         var runtimeControl = new CacheAnalyzerRuntimeControl();
         runtimeControl.Disable();
         var disabledContext = CreateContext();
+        var sink = new CollectingSink();
 
-        await InvokeAsync(CreateMiddleware(), disabledContext, runtimeControl: runtimeControl);
+        await InvokeAsync(CreateMiddleware(), disabledContext, runtimeControl: runtimeControl, sinks: [sink]);
 
         Assert.False(disabledContext.Response.Headers.ContainsKey("ETag"));
+        Assert.Empty(sink.Analyses);
 
         runtimeControl.Enable();
         var enabledContext = CreateContext();
-        await InvokeAsync(CreateMiddleware(), enabledContext, runtimeControl: runtimeControl);
+        await InvokeAsync(CreateMiddleware(), enabledContext, runtimeControl: runtimeControl, sinks: [sink]);
 
-        Assert.False(string.IsNullOrWhiteSpace(enabledContext.Response.Headers.ETag));
+        Assert.False(enabledContext.Response.Headers.ContainsKey("ETag"));
+        Assert.Single(sink.Analyses);
     }
 
     [Fact]
@@ -143,7 +165,7 @@ public sealed class CacheAnalyzerMiddlewareTests
     public void NewRequestKey_ReportsCapacityWithoutReplacingRecommendation()
     {
         var history = new InMemoryResponseFingerprintHistory();
-        var options = new CacheAnalysisOptions { MaximumTrackedRequests = 1 };
+        var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = 1 };
         var now = DateTimeOffset.UtcNow;
 
         history.Observe("GET /first", "\"first\"", 1_000, now, options);
@@ -189,6 +211,100 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.False(context.Response.Headers.ContainsKey("ETag"));
         Assert.Equal(CacheRecommendation.FingerprintTooSlow, Assert.Single(sink.Analyses).Recommendation);
         Assert.Equal(ResponseJson, ReadBody(context));
+    }
+
+    [Theory]
+    [InlineData("HEAD", EndpointSelectionMode.AttributedEndpoints)]
+    [InlineData("HEAD", EndpointSelectionMode.AllGetAndQueryRequests)]
+    [InlineData("POST", EndpointSelectionMode.AllGetAndQueryRequests)]
+    public async Task UnsupportedMethod_PreservesResponseWithoutAnalysis(string method, EndpointSelectionMode selection)
+    {
+        var context = CreateContext();
+        context.Request.Method = method;
+        var sink = new CollectingSink();
+        var middleware = new CacheAnalyzerMiddleware(ctx =>
+        {
+            ctx.Response.ContentLength = 123;
+            ctx.Response.Headers.ETag = "\"original\"";
+            return Task.CompletedTask;
+        });
+
+        await InvokeAsync(middleware, context, options: new() { EndpointSelection = selection }, sinks: [sink]);
+
+        Assert.Equal(123L, context.Response.ContentLength);
+        Assert.Equal("\"original\"", context.Response.Headers.ETag);
+        Assert.Empty(sink.Analyses);
+    }
+
+    [Fact]
+    public async Task Query_SeparatesBodiesAndMetadataAndPreservesEndpointInput()
+    {
+        var history = new InMemoryResponseFingerprintHistory();
+        var sink = new CollectingSink();
+        var options = new CacheAnalysisOptions { MinimumObservations = 2, MinimumPayloadToFingerprintRatio = 0 };
+        foreach (var (body, contentType) in new[]
+        {
+            ("first", "text/plain"), ("second", "text/plain"),
+            ("first", "application/example"), ("first", "text/plain")
+        })
+        {
+            var context = CreateContext();
+            context.Request.Method = "QUERY";
+            context.Request.ContentType = contentType;
+            context.Request.ContentLength = Encoding.UTF8.GetByteCount(body);
+            context.Request.Headers.IfNoneMatch = "*";
+            context.Request.Headers["X-Input"] = "unchanged";
+            context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body));
+            var middleware = new CacheAnalyzerMiddleware(async ctx =>
+            {
+                Assert.Equal("QUERY", ctx.Request.Method);
+                Assert.Equal(contentType, ctx.Request.ContentType);
+                Assert.Equal((long)Encoding.UTF8.GetByteCount(body), ctx.Request.ContentLength);
+                Assert.Equal("*", ctx.Request.Headers.IfNoneMatch);
+                Assert.Equal("unchanged", ctx.Request.Headers["X-Input"]);
+                using var reader = new StreamReader(ctx.Request.Body, leaveOpen: true);
+                Assert.Equal(body, await reader.ReadToEndAsync());
+                await ctx.Response.WriteAsync(ResponseJson);
+            });
+            await InvokeAsync(middleware, context, history: history, options: options, sinks: [sink]);
+        }
+
+        Assert.Equal(3, sink.Analyses.Select(x => x.RequestKey).Distinct().Count());
+        Assert.All(sink.Analyses.Take(3), x => Assert.Equal(CacheRecommendation.FirstObservation, x.Recommendation));
+        Assert.Equal(CacheRecommendation.CacheCandidate, sink.Analyses[3].Recommendation);
+    }
+
+    [Theory]
+    [InlineData(200, "GET")]
+    [InlineData(200, "QUERY")]
+    [InlineData(202, "GET")]
+    [InlineData(304, "GET")]
+    [InlineData(400, "GET")]
+    public async Task EndpointStatusHeadersAndBody_ArePreserved(int status, string method)
+    {
+        var context = CreateContext("*");
+        context.Request.Method = method;
+        var bytes = status == 304 ? Array.Empty<byte>() : new byte[] { 0, 255, 42, 128 };
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            ctx.Response.StatusCode = status;
+            ctx.Response.ContentType = "application/octet-stream";
+            ctx.Response.ContentLength = bytes.Length;
+            ctx.Response.Headers.ETag = "\"endpoint-owned\"";
+            ctx.Response.Headers.CacheControl = "private, max-age=60";
+            ctx.Response.Headers["X-Endpoint"] = "preserved";
+            await ctx.Response.Body.WriteAsync(bytes);
+        });
+
+        await InvokeAsync(middleware, context);
+
+        Assert.Equal(status, context.Response.StatusCode);
+        Assert.Equal("application/octet-stream", context.Response.ContentType);
+        Assert.Equal((long)bytes.Length, context.Response.ContentLength);
+        Assert.Equal("\"endpoint-owned\"", context.Response.Headers.ETag);
+        Assert.Equal("private, max-age=60", context.Response.Headers.CacheControl);
+        Assert.Equal("preserved", context.Response.Headers["X-Endpoint"]);
+        Assert.Equal(bytes, ((MemoryStream)context.Response.Body).ToArray());
     }
 
     private static CacheAnalyzerMiddleware CreateMiddleware()

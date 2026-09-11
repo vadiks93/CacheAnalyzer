@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/CacheAnalyzer.Sample.AspNetCore/CacheAnalyzer.Sample.AspNetCore.csproj" />
+    <Project Path="samples/CacheAnalyzer.Sample.NetFramework/CacheAnalyzer.Sample.NetFramework.csproj" />
+  </Folder>
   <Project Path="CacheAnalyzer.AspNetCore/CacheAnalyzer.AspNetCore.csproj" />
   <Project Path="CacheAnalyzer.Core/CacheAnalyzer.Core.csproj" />
   <Project Path="CacheAnalyzerHelper.Tests/CacheAnalyzerHelper.Tests.csproj" />

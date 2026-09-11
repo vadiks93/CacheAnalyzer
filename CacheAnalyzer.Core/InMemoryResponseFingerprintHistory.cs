@@ -14,37 +14,51 @@ public sealed class InMemoryResponseFingerprintHistory : IResponseFingerprintHis
         DateTimeOffset observedAt,
         CacheAnalysisOptions options)
     {
+        if (options.MaximumObservationsPerKey <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options.MaximumObservationsPerKey),
+                "The observation limit must be positive.");
+        }
+
         if (!_observations.TryGetValue(requestKey, out var observations))
         {
-            if (_observations.Count >= options.MaximumTrackedRequests)
+            // Admission is deliberately approximate when new keys arrive concurrently.
+            if (_observations.Count >= options.MaximumDistinctRequestKeys)
             {
                 return new FingerprintHistoryResult(
                     CacheRecommendation.InsufficientTraffic,
                     trackingCapacityReached: true);
             }
 
-            observations = _observations.GetOrAdd(
-                requestKey,
-                static _ => new ConcurrentQueue<Observation>());
+            observations = _observations.GetOrAdd(requestKey, static _ => new ConcurrentQueue<Observation>());
         }
 
         observations.Enqueue(new Observation(fingerprint, observedAt));
-
         var windowStart = observedAt - options.ObservationWindow;
-        while (observations.TryPeek(out var oldest) && oldest.ObservedAt < windowStart)
+        while (observations.TryPeek(out var oldest) &&
+               (oldest.ObservedAt < windowStart || observations.Count > options.MaximumObservationsPerKey))
         {
             observations.TryDequeue(out _);
         }
 
-        // Enumeration is a moment-in-time snapshot. Concurrent requests may make
-        // this conservative, but no request waits for another request.
-        var snapshot = observations.ToArray();
+        // Other requests may enqueue or prune during this operation. Approximate history
+        // is intentional: never add application locks to make recommendations consistent.
+        var retained = observations.ToArray();
+        var snapshot = retained
+            .Skip(Math.Max(0, retained.Length - options.MaximumObservationsPerKey))
+            .Where(observation => observation.ObservedAt >= windowStart)
+            .ToArray();
+        if (snapshot.Length == 0)
+        {
+            return new FingerprintHistoryResult(CacheRecommendation.InsufficientTraffic);
+        }
         if (snapshot.Length == 1)
         {
             return new FingerprintHistoryResult(CacheRecommendation.FirstObservation);
         }
 
-        if (!string.Equals(snapshot[snapshot.Length - 2].Fingerprint, fingerprint, StringComparison.Ordinal))
+        if (snapshot.Any(observation =>
+            !string.Equals(observation.Fingerprint, fingerprint, StringComparison.Ordinal)))
         {
             return new FingerprintHistoryResult(CacheRecommendation.ResponseChanged);
         }
