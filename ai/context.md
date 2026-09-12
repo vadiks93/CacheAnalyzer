@@ -28,6 +28,8 @@ Outbound `HttpClient` and typed API-client analysis is deferred and is not part 
 
 ## Analysis And Reporting
 
+- `MinimumObservationsPerKey` defaults to 10 retained observations within the window for each key. `MaximumObservationsPerKey` remains 1,000. The minimum controls recommendation eligibility; the maximum controls retention. Samples explicitly use a minimum of 3 for quick demonstrations.
+
 - Analyze responses independently of whether the client sent a conditional header.
 - Recommend caching when the same request key repeatedly produces the same response fingerprint.
 - Avoid analysis for payloads over a configurable size limit.
@@ -36,8 +38,9 @@ Outbound `HttpClient` and typed API-client analysis is deferred and is not part 
 - ASP.NET Core supplies an `ILogger` sink by default. Applications may add sinks for console, files, Splunk, or other systems through dependency injection.
 - Analysis can be selected globally for all GET/QUERY requests or restricted to endpoints marked with `[CacheAnalyze]`.
 - A reloadable `Enabled` option and a runtime control service can bypass analysis immediately. Disabled requests must avoid response buffering and hashing.
-- Keep analysis deliberately small: use a fixed-capacity in-memory table and stop admitting new request keys when it is full instead of building a complex eviction system initially.
-- `MaximumDistinctRequestKeys` (renamed from `MaximumTrackedRequests`) defaults to 200. `MaximumObservationsPerKey` defaults to 1,000 and must be positive. Use `ConcurrentQueue` history, prune expired queue-head and oldest excess entries, and compare all fingerprints in a capped, time-filtered snapshot with the current response.
+- Capacity policy belongs to the adapter, not `Observe`. History exposes `GetCountDistinctRequests()` and `Clear()`. At the distinct-key limit, stop all analysis for the adapter instance's lifetime, log once at Information, clear history, and bypass subsequent requests before buffering or hashing. Re-enabling runtime control does not reset capacity shutdown. In-flight work may finish; final cleanup releases any late observations. No per-request capacity recommendation is emitted.
+- Shutdown flags and history references use ordinary reads; delayed visibility and missed observations are acceptable. Do not add `Volatile.Read` for exact observation accounting. Retain an atomic shutdown transition only to select the single caller that logs the capacity message.
+- `MaximumDistinctRequestKeys` (renamed from `MaximumTrackedRequests`) defaults to 350. `MaximumObservationsPerKey` defaults to 1,000 and must be positive. Use `ConcurrentQueue` history, prune expired queue-head and oldest excess entries, and compare all fingerprints in a capped, time-filtered snapshot with the current response.
 - User rule: no application-level locking anywhere; see [AGENTS.md](../AGENTS.md). Do not add locks, semaphores, or equivalent serialization to obtain exact analysis consistency. Approximate snapshots, over-pruning, temporary queue overshoot, and concurrent key-admission overshoot are accepted. Concurrent collections are allowed even though they may synchronize internally. Do not promise strict concurrent bounds or formal lock-freedom.
 - A cache recommendation should require both repeated requests within an observation window and a useful payload-to-fingerprint size ratio. The initial proposed ratio is at least 10:1; isolated traffic such as one request per day is not a cache candidate.
 

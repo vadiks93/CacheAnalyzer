@@ -11,6 +11,9 @@ namespace CacheAnalyzer.AspNetCore;
 public sealed class CacheAnalyzerMiddleware
 {
     private readonly RequestDelegate _next;
+    // Volatile.Read is intentionally omitted: delayed visibility and a few extra or
+    // missed observations are acceptable. Only the one-time log needs an atomic transition.
+    private int _capacityReached;
 
     public CacheAnalyzerMiddleware(RequestDelegate next)
     {
@@ -26,8 +29,20 @@ public sealed class CacheAnalyzerMiddleware
         IEnumerable<IResponseAnalysisSink> sinks,
         ILogger<CacheAnalyzerMiddleware> logger)
     {
+        if (_capacityReached != 0)
+        {
+            await _next(context);
+            return;
+        }
+
         var options = optionsMonitor.CurrentValue;
         if (!options.Enabled || !runtimeControl.IsEnabled || !ShouldAnalyze(context, options))
+        {
+            await _next(context);
+            return;
+        }
+
+        if (StopAtCapacity(history, options, logger))
         {
             await _next(context);
             return;
@@ -43,7 +58,7 @@ public sealed class CacheAnalyzerMiddleware
         {
             await _next(context);
 
-            if (!CanAnalyzeResponse(context.Response))
+            if (StopAtCapacity(history, options, logger) || !CanAnalyzeResponse(context.Response))
             {
                 await CopyResponseAsync(bufferedBody, originalBody);
                 return;
@@ -85,29 +100,60 @@ public sealed class CacheAnalyzerMiddleware
                 return;
             }
 
+            if (StopAtCapacity(history, options, logger))
+            {
+                await originalBody.WriteAsync(responseBytes, context.RequestAborted);
+                return;
+            }
+
             var historyResult = history.Observe(
                 requestKey,
                 fingerprint,
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
                 options);
-            Report(
-                sinks,
-                logger,
-                new ResponseAnalysis(
-                    requestKey,
-                    historyResult.Recommendation,
-                    responseBytes.LongLength,
-                    stopwatch.Elapsed,
-                    fingerprint,
-                    historyResult.TrackingCapacityReached));
+            if (_capacityReached == 0)
+            {
+                Report(
+                    sinks,
+                    logger,
+                    new ResponseAnalysis(
+                        requestKey,
+                        historyResult.Recommendation,
+                        responseBytes.LongLength,
+                        stopwatch.Elapsed,
+                        fingerprint));
+            }
+
+            StopAtCapacity(history, options, logger);
 
             await originalBody.WriteAsync(responseBytes, context.RequestAborted);
         }
         finally
         {
             context.Response.Body = originalBody;
+            // A request may have entered Observe concurrently with shutdown.
+            if (_capacityReached != 0) history.Clear();
         }
+    }
+
+    private bool StopAtCapacity(
+        IResponseFingerprintHistory history,
+        CacheAnalysisOptions options,
+        ILogger logger)
+    {
+        if (_capacityReached != 0) return true;
+        if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
+
+        if (Interlocked.Exchange(ref _capacityReached, 1) == 0)
+        {
+            history.Clear();
+            logger.LogInformation(
+                "Cache analysis stopped after reaching the distinct request key limit of {MaximumDistinctRequestKeys}. Retained history was cleared; subsequent requests bypass analysis for this pipeline's lifetime.",
+                options.MaximumDistinctRequestKeys);
+        }
+
+        return true;
     }
 
     private static async Task<string> CreateRequestKeyAsync(HttpRequest request)

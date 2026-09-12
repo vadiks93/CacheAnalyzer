@@ -10,6 +10,7 @@ public sealed class ResponseFingerprintHistoryTests
         var options = new CacheAnalysisOptions();
         Assert.Equal(200, options.MaximumDistinctRequestKeys);
         Assert.Equal(1_000, options.MaximumObservationsPerKey);
+        Assert.Equal(10, options.MinimumObservationsPerKey);
     }
 
     [Fact]
@@ -33,7 +34,7 @@ public sealed class ResponseFingerprintHistoryTests
     {
         var history = new InMemoryResponseFingerprintHistory();
         var options = Options(limit: 3);
-        options.MinimumObservations = 4;
+        options.MinimumObservationsPerKey = 4;
 
         for (var i = 0; i < 100; i++)
         {
@@ -84,21 +85,23 @@ public sealed class ResponseFingerprintHistoryTests
     }
 
     [Fact]
-    public void ConcurrentDistinctKeys_RejectFurtherKeysOnceCapacityIsReached()
+    public void DistinctCountAndClear_LeaveCapacityPolicyToCaller()
     {
         var history = new InMemoryResponseFingerprintHistory();
         var options = Options(limit: 3);
         options.MaximumDistinctRequestKeys = 10;
-        var admitted = 0;
 
         Parallel.For(0, 500, i =>
         {
-            var result = history.Observe(i.ToString(), "A", 100, DateTimeOffset.UtcNow, options);
-            if (!result.TrackingCapacityReached) Interlocked.Increment(ref admitted);
+            history.Observe(i.ToString(), "A", 100, DateTimeOffset.UtcNow, options);
         });
 
-        Assert.InRange(admitted, 10, 500);
-        Assert.True(history.Observe("new-key", "A", 100, DateTimeOffset.UtcNow, options).TrackingCapacityReached);
+        Assert.Equal(500, history.GetCountDistinctRequests());
+        history.Clear();
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Equal(CacheRecommendation.FirstObservation,
+            history.Observe("0", "B", 100, DateTimeOffset.UtcNow, options).Recommendation);
+        Assert.Equal(1, history.GetCountDistinctRequests());
     }
 
     [Fact]
@@ -106,7 +109,7 @@ public sealed class ResponseFingerprintHistoryTests
     {
         var history = new InMemoryResponseFingerprintHistory();
         var options = Options(limit: 10);
-        options.MinimumObservations = 11;
+        options.MinimumObservationsPerKey = 11;
 
         Parallel.For(0, 1_000, i =>
         {
@@ -115,7 +118,7 @@ public sealed class ResponseFingerprintHistoryTests
                 new[] { CacheRecommendation.FirstObservation, CacheRecommendation.InsufficientTraffic });
         });
 
-        options.MinimumObservations = 10;
+        options.MinimumObservationsPerKey = 10;
         // Concurrent pruning may discard extra entries. Refill after writers finish;
         // recommendations need not reflect a transactionally consistent history.
         for (var i = 0; i < 10; i++)
@@ -134,7 +137,7 @@ public sealed class ResponseFingerprintHistoryTests
     private static CacheAnalysisOptions Options(int limit) => new()
     {
         MaximumObservationsPerKey = limit,
-        MinimumObservations = 2,
+        MinimumObservationsPerKey = 2,
         MinimumPayloadToFingerprintRatio = 0
     };
 }

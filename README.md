@@ -34,9 +34,9 @@ builder.Services.AddCacheAnalyzer(options =>
     options.EndpointSelection = EndpointSelectionMode.AttributedEndpoints;
     options.MaximumPayloadBytes = 1024 * 1024;
     options.MaximumFingerprintDuration = TimeSpan.FromMilliseconds(25);
-    options.MaximumDistinctRequestKeys = 200;
+    options.MaximumDistinctRequestKeys = 350;
     options.MaximumObservationsPerKey = 1_000;
-    options.MinimumObservations = 10;
+    options.MinimumObservationsPerKey = 10;
     options.ObservationWindow = TimeSpan.FromHours(1);
     options.MinimumPayloadToFingerprintRatio = 10;
 });
@@ -92,9 +92,11 @@ Analysis runs independently of client conditional headers. The API retains owner
 
 The current adapter buffers responses before forwarding them and buffers QUERY input to calculate a key. This adds memory and latency overhead; MaximumPayloadBytes limits hashing, not response buffering. Streaming, explicit flush/start operations, and custom body features need further compatibility work before enabling analysis broadly. Prefer endpoint opt-in for ordinary buffered APIs.
 
-The in-memory tracker defaults to 200 distinct request keys (`MaximumDistinctRequestKeys`, formerly `MaximumTrackedRequests`) and 1,000 observations per key (`MaximumObservationsPerKey`). Once the key table is full, it continues updating known keys but does not admit new keys. A rejected key is reported with `TrackingCapacityReached = true` while its recommendation remains `InsufficientTraffic`. Keys are not automatically evicted.
+The middleware defaults to a limit of 350 distinct request keys (`MaximumDistinctRequestKeys`, formerly `MaximumTrackedRequests`), with history retaining up to 1,000 observations per key (`MaximumObservationsPerKey`). `MinimumObservationsPerKey` defaults to 10 and controls the evidence needed for a recommendation; keep it at or below the observation maximum. The middleware checks `GetCountDistinctRequests()` before analysis and observation, and after recording an observation. Once the limit is detected, it logs one Information message, clears history, and permanently bypasses analysis for that middleware instance. Later requests go directly to the next handler without analyzer buffering, hashing, observations, or reports. Runtime enablement or increasing the limit does not reset this stop; recreate the pipeline (normally by restarting the application) to analyze again. The middleware remains registered in the built pipeline.
 
-Each observation prunes expired queue-head entries and oldest excess entries. Analysis uses a capped snapshot filtered to the observation window, including when timestamps arrive out of order. A cache candidate requires enough snapshot entries, all matching the current fingerprint, and a useful payload-to-fingerprint ratio. Set `MaximumObservationsPerKey` to a positive value at least as large as `MinimumObservations`. Response bodies are never stored in history.
+Capacity checks are best effort: concurrent requests can temporarily exceed the limit, and work or reports already in flight may finish. Retained history is cleared again as those requests finish, allowing its memory to be reclaimed by GC; this does not force immediate process-memory reduction or clear data retained by custom sinks. `IResponseFingerprintHistory` exposes `GetCountDistinctRequests()` and `Clear()`; custom implementations must implement these methods, and direct callers must enforce their own distinct-key capacity policy. The .NET Framework sample handler applies the same stop-and-bypass policy.
+
+Each observation prunes expired queue-head entries and oldest excess entries. Analysis uses a capped snapshot filtered to the observation window, including when timestamps arrive out of order. A cache candidate requires enough snapshot entries, all matching the current fingerprint, and a useful payload-to-fingerprint ratio. Set `MaximumObservationsPerKey` to a positive value at least as large as `MinimumObservationsPerKey`. Response bodies are never stored in history.
 
 No application-level locks are used: concurrent queues and snapshots deliberately provide approximate analysis. Concurrent admission can exceed the distinct-key limit; concurrent queue updates can temporarily exceed the observation limit or discard extra entries. The default retention target is 200,000 observations, not a strict concurrent ceiling. Expired entries behind a newer queue head are excluded from analysis and reclaimed as the queue advances. Lowering the key limit does not evict existing keys; a changed observation limit applies when a key is next observed.
 

@@ -8,7 +8,7 @@ builder.WebHost.UseUrls(builder.Configuration["urls"] ?? "http://localhost:5080"
 builder.Services.AddControllers();
 builder.Services.AddCacheAnalyzer(options =>
 {
-    options.MinimumObservations = 3;
+    options.MinimumObservationsPerKey = 3;
     options.MinimumPayloadToFingerprintRatio = 0;
     options.MaximumDistinctRequestKeys = 200;
     options.MaximumObservationsPerKey = 1_000;

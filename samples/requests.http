@@ -28,3 +28,27 @@ GET {{baseUrl}}/health
 
 ### Excluded HTTP method
 HEAD {{baseUrl}}/api/products
+
+### Larger stable JSON: repeat three times, inspect console recommendations
+GET {{baseUrl}}/api/scenarios/large-json
+
+### Random data changes at the same URL
+GET {{baseUrl}}/api/scenarios/random-json
+
+### Repeat six times: A,A,A,B,B,B (restart the host to reset)
+GET {{baseUrl}}/api/scenarios/mixed-json
+
+### Stable plain text
+GET {{baseUrl}}/api/scenarios/text
+
+### Stable XML
+GET {{baseUrl}}/api/scenarios/xml
+
+### Actual CSV file attachment
+GET {{baseUrl}}/api/scenarios/csv-file
+
+### Deterministic 256 KiB binary attachment
+GET {{baseUrl}}/api/scenarios/binary-file
+
+### 4 MiB attachment: full body returned, hashing skipped
+GET {{baseUrl}}/api/scenarios/oversized-file

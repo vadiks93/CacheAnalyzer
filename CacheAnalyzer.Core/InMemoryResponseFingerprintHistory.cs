@@ -4,8 +4,14 @@ namespace CacheAnalyzer.Core;
 
 public sealed class InMemoryResponseFingerprintHistory : IResponseFingerprintHistory
 {
-    private readonly ConcurrentDictionary<string, ConcurrentQueue<Observation>> _observations =
+    // Volatile.Read is intentionally omitted: analysis need not be 100% accurate,
+    // so a concurrent reader using an older table and missing observations is acceptable.
+    private ConcurrentDictionary<string, ConcurrentQueue<Observation>> _observations =
         new(StringComparer.Ordinal);
+
+    public int GetCountDistinctRequests() => _observations.Count;
+
+    public void Clear() => _observations = new(StringComparer.Ordinal);
 
     public FingerprintHistoryResult Observe(
         string requestKey,
@@ -20,18 +26,10 @@ public sealed class InMemoryResponseFingerprintHistory : IResponseFingerprintHis
                 "The observation limit must be positive.");
         }
 
-        if (!_observations.TryGetValue(requestKey, out var observations))
-        {
-            // Admission is deliberately approximate when new keys arrive concurrently.
-            if (_observations.Count >= options.MaximumDistinctRequestKeys)
-            {
-                return new FingerprintHistoryResult(
-                    CacheRecommendation.InsufficientTraffic,
-                    trackingCapacityReached: true);
-            }
-
-            observations = _observations.GetOrAdd(requestKey, static _ => new ConcurrentQueue<Observation>());
-        }
+        // Capacity policy belongs to the caller. Clearing detaches this table so
+        // writers already using it cannot repopulate the replacement table.
+        var table = _observations;
+        var observations = table.GetOrAdd(requestKey, static _ => new ConcurrentQueue<Observation>());
 
         observations.Enqueue(new Observation(fingerprint, observedAt));
         var windowStart = observedAt - options.ObservationWindow;
@@ -66,7 +64,7 @@ public sealed class InMemoryResponseFingerprintHistory : IResponseFingerprintHis
         var fingerprintBytes = fingerprint.Length;
         var hasUsefulRatio = fingerprintBytes > 0 &&
                              payloadBytes / (double)fingerprintBytes >= options.MinimumPayloadToFingerprintRatio;
-        var hasEnoughTraffic = snapshot.Length >= options.MinimumObservations;
+        var hasEnoughTraffic = snapshot.Length >= options.MinimumObservationsPerKey;
 
         return new FingerprintHistoryResult(
             hasUsefulRatio && hasEnoughTraffic

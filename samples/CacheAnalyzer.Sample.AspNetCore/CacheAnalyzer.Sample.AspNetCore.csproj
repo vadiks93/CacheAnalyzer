@@ -5,6 +5,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Shared/SamplePayloads.cs" Link="SamplePayloads.cs" />
+    <Content Include="../Shared/Assets/report.csv" Link="Assets/report.csv" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="../../CacheAnalyzer.AspNetCore/CacheAnalyzer.AspNetCore.csproj" />
   </ItemGroup>
 </Project>

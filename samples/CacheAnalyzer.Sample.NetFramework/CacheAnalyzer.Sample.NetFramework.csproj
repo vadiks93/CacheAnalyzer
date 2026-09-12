@@ -6,6 +6,8 @@
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Shared/SamplePayloads.cs" Link="SamplePayloads.cs" />
+    <Content Include="../Shared/Assets/report.csv" Link="Assets/report.csv" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="../../CacheAnalyzer.Core/CacheAnalyzer.Core.csproj" />
     <PackageReference Include="Microsoft.AspNet.WebApi.OwinSelfHost" Version="5.3.0" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />

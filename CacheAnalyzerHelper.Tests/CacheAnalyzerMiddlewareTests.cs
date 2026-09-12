@@ -4,6 +4,7 @@ using CacheAnalyzer.Core;
 using CacheAnalyzerHelper;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CacheAnalyzerHelper.Tests;
@@ -126,7 +127,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         var sink = new CollectingSink();
         var options = new CacheAnalysisOptions
         {
-            MinimumObservations = 2,
+            MinimumObservationsPerKey = 2,
             MinimumPayloadToFingerprintRatio = 0
         };
 
@@ -145,7 +146,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         var history = new InMemoryResponseFingerprintHistory();
         var options = new CacheAnalysisOptions
         {
-            MinimumObservations = 2,
+            MinimumObservationsPerKey = 2,
             MinimumPayloadToFingerprintRatio = 10
         };
         var now = DateTimeOffset.UtcNow;
@@ -162,17 +163,106 @@ public sealed class CacheAnalyzerMiddlewareTests
     }
 
     [Fact]
-    public void NewRequestKey_ReportsCapacityWithoutReplacingRecommendation()
+    public async Task CapacityReached_LogsOnceClearsHistoryAndPermanentlyBypasses()
     {
         var history = new InMemoryResponseFingerprintHistory();
         var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = 1 };
-        var now = DateTimeOffset.UtcNow;
+        var logger = new CollectingLogger();
+        var sink = new CollectingSink();
+        var bypassExpected = false;
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            if (bypassExpected) Assert.Same(ctx.Items["originalBody"], ctx.Response.Body);
+            ctx.Response.Headers.ETag = "\"application-owned\"";
+            await ctx.Response.WriteAsync(ResponseJson);
+        });
 
-        history.Observe("GET /first", "\"first\"", 1_000, now, options);
-        var result = history.Observe("GET /second", "\"second\"", 1_000, now, options);
+        await InvokeAsync(middleware, CreateContext(), history: history, options: options, sinks: [sink], logger: logger);
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Single(sink.Analyses);
 
-        Assert.Equal(CacheRecommendation.InsufficientTraffic, result.Recommendation);
-        Assert.True(result.TrackingCapacityReached);
+        bypassExpected = true;
+        options.MaximumDistinctRequestKeys = 100;
+        for (var i = 0; i < 100; i++)
+        {
+            var context = CreateContext();
+            context.Request.Method = "QUERY";
+            context.Items["originalBody"] = context.Response.Body;
+            await InvokeAsync(middleware, context, provider: new ThrowingFingerprintProvider(),
+                history: history, options: options, sinks: [sink], logger: logger);
+            Assert.Equal(ResponseJson, ReadBody(context));
+            Assert.Equal("\"application-owned\"", context.Response.Headers.ETag);
+        }
+
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Single(sink.Analyses);
+        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task FullHistory_BypassesBeforeBufferingOrObservation(int limit)
+    {
+        var history = new InMemoryResponseFingerprintHistory();
+        var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = limit };
+        if (limit > 0) history.Observe("existing", "A", 100, DateTimeOffset.UtcNow, options);
+        var context = CreateContext();
+        var originalBody = context.Response.Body;
+        var sink = new CollectingSink();
+        var logger = new CollectingLogger();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            Assert.Same(originalBody, ctx.Response.Body);
+            await ctx.Response.WriteAsync(ResponseJson);
+        });
+
+        await InvokeAsync(middleware, context, provider: new ThrowingFingerprintProvider(),
+            history: history, options: options, sinks: [sink], logger: logger);
+
+        Assert.Equal(ResponseJson, ReadBody(context));
+        Assert.Empty(sink.Analyses);
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+    }
+
+    [Fact]
+    public async Task ConcurrentCapacityShutdown_InFlightRequestsDoNotRepopulateHistory()
+    {
+        var history = new InMemoryResponseFingerprintHistory();
+        var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = 1 };
+        var logger = new CollectingLogger();
+        var sink = new CollectingSink();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            if (ctx.Request.Path == "/paused")
+            {
+                entered.SetResult();
+                await release.Task;
+            }
+            await ctx.Response.WriteAsync(ResponseJson);
+        });
+        var paused = CreateContext();
+        paused.Request.Path = "/paused";
+        var pending = InvokeAsync(middleware, paused, provider: new ThrowingFingerprintProvider(),
+            history: history, options: options, sinks: [sink], logger: logger);
+        await entered.Task;
+        try
+        {
+            await InvokeAsync(middleware, CreateContext(), history: history, options: options, sinks: [sink], logger: logger);
+        }
+        finally
+        {
+            release.SetResult();
+        }
+        await pending;
+
+        Assert.Equal(ResponseJson, ReadBody(paused));
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Single(sink.Analyses);
+        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
     }
 
     [Fact]
@@ -241,7 +331,7 @@ public sealed class CacheAnalyzerMiddlewareTests
     {
         var history = new InMemoryResponseFingerprintHistory();
         var sink = new CollectingSink();
-        var options = new CacheAnalysisOptions { MinimumObservations = 2, MinimumPayloadToFingerprintRatio = 0 };
+        var options = new CacheAnalysisOptions { MinimumObservationsPerKey = 2, MinimumPayloadToFingerprintRatio = 0 };
         foreach (var (body, contentType) in new[]
         {
             ("first", "text/plain"), ("second", "text/plain"),
@@ -347,7 +437,8 @@ public sealed class CacheAnalyzerMiddlewareTests
         IResponseFingerprintHistory? history = null,
         CacheAnalysisOptions? options = null,
         IEnumerable<IResponseAnalysisSink>? sinks = null,
-        ICacheAnalyzerRuntimeControl? runtimeControl = null)
+        ICacheAnalyzerRuntimeControl? runtimeControl = null,
+        ILogger<CacheAnalyzerMiddleware>? logger = null)
     {
         var configuredOptions = options ?? new CacheAnalysisOptions();
         return middleware.InvokeAsync(
@@ -357,7 +448,21 @@ public sealed class CacheAnalyzerMiddlewareTests
             new StaticOptionsMonitor<CacheAnalysisOptions>(configuredOptions),
             runtimeControl ?? new CacheAnalyzerRuntimeControl(),
             sinks ?? [],
-            NullLogger<CacheAnalyzerMiddleware>.Instance);
+            logger ?? NullLogger<CacheAnalyzerMiddleware>.Instance);
+    }
+
+    private sealed class ThrowingFingerprintProvider : IResponseFingerprintProvider
+    {
+        public string CreateFingerprint(byte[] responseBody) => throw new InvalidOperationException("Bypassed requests must not be hashed.");
+    }
+
+    private sealed class CollectingLogger : ILogger<CacheAnalyzerMiddleware>
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<LogLevel> Levels { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Levels.Enqueue(logLevel);
     }
 
     private sealed class CollectingSink : IResponseAnalysisSink

@@ -58,10 +58,45 @@ With both APIs running, execute the HTTP smoke checks:
 powershell -ExecutionPolicy Bypass -File .\samples\Test-Samples.ps1
 ```
 
+## Payload scenarios in both APIs
+
+`MinimumObservationsPerKey` is **per distinct request key**, not a total across endpoints. The library default is 100; these samples use 3. The latest retained observations within the window must all match before that key becomes a candidate (and the payload ratio must qualify). Different URLs, query strings, or QUERY bodies have separate histories.
+
+All routes below use GET under `/api/scenarios/` on either port:
+
+| Route suffix | Payload | Expected analysis when repeated |
+| --- | --- | --- |
+| `large-json` | 2,000 products, about 306 KiB | Stable; candidate after 3 observations |
+| `random-json` | About 64 KiB of JSON with a new random GUID each time | `ResponseChanged` after the first observation |
+| `mixed-json` | About 16 KiB of JSON; A,A,A,B,B,B repeating | First block becomes a candidate; then changes remain visible in history |
+| `text` | 128 KiB of plain text plus newline | Stable; candidate after 3 observations |
+| `xml` | 1,000 XML product elements | Stable; candidate after 3 observations |
+| `csv-file` | Actual `Assets/report.csv` file, downloaded as an attachment | Stable; edit the output file to simulate a changed export |
+| `binary-file` | 256 KiB of deterministic binary bytes, downloaded as `sample.bin` | Stable; candidate after 3 observations |
+| `oversized-file` | 4 MiB download | `PayloadTooLarge` with the default 3 MiB hashing limit; full download still returned |
+
+Recommendations assume fingerprinting finishes within the configured duration. Slow hashing is reported separately. The oversized payload is still buffered: the hashing limit does not cap buffering memory.
+
+The ASP.NET Core sample enables Debug logging for the analysis sink in `appsettings.json`, so first observations and changing responses appear alongside candidate reports. When launching its DLL directly, use the sample output directory as the working directory so that configuration is loaded. `dotnet run --project` uses the project directory automatically.
+
+```powershell
+1..3 | ForEach-Object { curl.exe -s -o NUL http://localhost:5080/api/scenarios/large-json }
+1..6 | ForEach-Object { curl.exe -s -o NUL http://localhost:5080/api/scenarios/mixed-json }
+curl.exe -i http://localhost:5080/api/scenarios/xml
+curl.exe -o sample.bin http://localhost:5080/api/scenarios/binary-file
+curl.exe -o report.csv http://localhost:5080/api/scenarios/csv-file
+```
+
+The mixed sequence is per host process and shared by callers; restart the host for a fresh sequence/history. A single differing observation prevents a candidate until it leaves the retained history. Do not vary the URL to simulate changing content: that would create different keys instead.
+
+Formats other than JSON are useful because fingerprinting compares **exact bytes**. XML, CSV, text, and binary files work the same way; even whitespace changes or reordered JSON properties change the fingerprint. This is not semantic content comparison.
+
+The CSV source in `Shared/Assets` is copied to each application's output `Assets` folder during build. File examples load or generate bounded byte arrays; they do not demonstrate streaming, range requests, or arbitrarily large file handling. `Shared/SamplePayloads.cs` provides identical payload generation to both hosts.
+
 ## Integration differences
 
 The .NET 10 sample uses the real `AddCacheAnalyzer`, `UseCacheAnalyzer`, and `[CacheAnalyze]` integration. Its `Program.cs` contains the registration and controller examples.
 
 The .NET Framework sample references `CacheAnalyzer.Core` (`netstandard2.0`). The existing ASP.NET Core middleware and Metalama marker target .NET 10 and cannot be referenced from .NET Framework. `SampleCacheAnalysisHandler` demonstrates calling the shared fingerprint provider and history from a Web API message handler, selecting only GET/QUERY requests under `/api/`. It is sample code for small buffered responses, not a supported general-purpose Framework adapter or full equivalent of the ASP.NET Core integration. It does not expose the runtime switch, attribute selection, or pluggable reporting sinks.
 
-Both examples use public, fixed demo data and local HTTP addresses. QUERY request content is incorporated into the analysis key without logging its raw body.
+Both examples use synthetic demo data and local HTTP addresses. QUERY request content is incorporated into the analysis key without logging its raw body.

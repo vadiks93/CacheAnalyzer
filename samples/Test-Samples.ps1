@@ -11,10 +11,17 @@ function Send-SampleRequest([string]$Method, [string]$Url, [string]$Body = '', [
         if ($ETag) { $request.Headers.TryAddWithoutValidation('If-None-Match', $ETag) | Out-Null }
         $response = $client.SendAsync($request).GetAwaiter().GetResult()
         try {
+            $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $hash = [Convert]::ToBase64String($sha.ComputeHash($bytes)) } finally { $sha.Dispose() }
             [PSCustomObject]@{
                 Status = [int]$response.StatusCode
                 ETag = [string]$response.Headers.ETag
                 Body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                Length = $bytes.Length
+                Hash = $hash
+                ContentType = $response.Content.Headers.ContentType.MediaType
+                Disposition = [string]$response.Content.Headers.ContentDisposition
             }
         } finally { $response.Dispose() }
     } finally { $request.Dispose() }
@@ -47,6 +54,44 @@ try {
         Assert-Sample ($health.Status -eq 200 -and -not $health.ETag) "$base health must bypass analysis"
         $head = Send-SampleRequest HEAD "$base/api/products"
         Assert-Sample (-not $head.ETag) "$base HEAD must bypass analysis"
+        foreach ($scenario in @(
+            @{ Name = 'large-json'; Type = 'application/json'; Minimum = 300000 },
+            @{ Name = 'text'; Type = 'text/plain'; Minimum = 131072 },
+            @{ Name = 'xml'; Type = 'application/xml'; Minimum = 50000 },
+            @{ Name = 'csv-file'; Type = 'text/csv'; Minimum = 50 },
+            @{ Name = 'binary-file'; Type = 'application/octet-stream'; Minimum = 262144 },
+            @{ Name = 'oversized-file'; Type = 'application/octet-stream'; Minimum = 4194304 }
+        )) {
+            $url = "$base/api/scenarios/" + $scenario.Name
+            $initial = Send-SampleRequest GET $url
+            Assert-Sample ($initial.Status -eq 200 -and -not $initial.ETag) "$url must return 200 without ETag"
+            Assert-Sample ($initial.ContentType -eq $scenario.Type -and $initial.Length -ge $scenario.Minimum) "$url content type or size is incorrect"
+            if ($scenario.Name.EndsWith('-file')) {
+                Assert-Sample ($initial.Disposition -match 'attachment') "$url must remain a file attachment"
+            }
+            if ($scenario.Name -eq 'large-json') {
+                $catalog = $initial.Body | ConvertFrom-Json
+                Assert-Sample ($catalog.products.Count -eq 2000) "$url must contain 2000 products"
+            }
+            if ($scenario.Name -eq 'xml') {
+                $catalogXml = [xml]$initial.Body
+                Assert-Sample ($catalogXml.catalog.product.Count -eq 1000) "$url must contain 1000 XML products"
+            }
+            1..2 | ForEach-Object {
+                $again = Send-SampleRequest GET $url -ETag '*'
+                Assert-Sample ($again.Status -eq 200 -and $again.Hash -eq $initial.Hash -and -not $again.ETag) "$url must preserve every byte on repeat requests"
+            }
+        }
+        $random = Send-SampleRequest GET "$base/api/scenarios/random-json"
+        $randomAgain = Send-SampleRequest GET "$base/api/scenarios/random-json"
+        Assert-Sample ($random.Status -eq 200 -and $randomAgain.Status -eq 200 -and $random.Hash -ne $randomAgain.Hash) "$base random payload must change"
+        $versions = @(1..6 | ForEach-Object {
+            $mixed = Send-SampleRequest GET "$base/api/scenarios/mixed-json"
+            Assert-Sample ($mixed.Status -eq 200 -and -not $mixed.ETag) "$base mixed payload must return 200 without ETag"
+            ($mixed.Body | ConvertFrom-Json).version
+        })
+        Assert-Sample (@($versions | Where-Object { $_ -eq 'A' }).Count -eq 3 -and @($versions | Where-Object { $_ -eq 'B' }).Count -eq 3) "$base mixed sequence must contain three of each version (run without concurrent callers)"
         Write-Host "PASS $base - GET, QUERY, conditional responses, changed content, health, HEAD"
+        Write-Host "PASS $base - large/random/mixed JSON, text, XML, CSV and binary attachments, oversized response"
     }
 } finally { $client.Dispose() }
