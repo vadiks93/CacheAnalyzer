@@ -11,9 +11,10 @@ namespace CacheAnalyzer.AspNetCore;
 public sealed class CacheAnalyzerMiddleware
 {
     private readonly RequestDelegate _next;
-    // Volatile.Read is intentionally omitted: delayed visibility and a few extra or
-    // missed observations are acceptable. Only the one-time log needs an atomic transition.
-    private int _capacityReached;
+    private readonly SlowFingerprintExclusions _slowFingerprints = new();
+    // Volatile reads provide cross-thread visibility of shutdown without locking.
+    // In-flight analysis remains best effort; the atomic transition selects one logger.
+    private int _analysisStopped;
 
     public CacheAnalyzerMiddleware(RequestDelegate next)
     {
@@ -29,7 +30,7 @@ public sealed class CacheAnalyzerMiddleware
         IEnumerable<IResponseAnalysisSink> sinks,
         ILogger<CacheAnalyzerMiddleware> logger)
     {
-        if (_capacityReached != 0)
+        if (Volatile.Read(ref _analysisStopped) != 0)
         {
             await _next(context);
             return;
@@ -49,6 +50,15 @@ public sealed class CacheAnalyzerMiddleware
         }
 
         var requestKey = await CreateRequestKeyAsync(context.Request);
+        // Group only GET query variants; QUERY request bodies retain their own identity.
+        var getPathKey = HttpMethods.IsGet(context.Request.Method)
+            ? $"GET {context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{context.Request.Path}"
+            : null;
+        if (_slowFingerprints.IsExcluded(requestKey, getPathKey, options))
+        {
+            await _next(context);
+            return;
+        }
         var originalBody = context.Response.Body;
 
         await using var bufferedBody = new MemoryStream();
@@ -58,7 +68,9 @@ public sealed class CacheAnalyzerMiddleware
         {
             await _next(context);
 
-            if (StopAtCapacity(history, options, logger) || !CanAnalyzeResponse(context.Response))
+            if (StopAtCapacity(history, options, logger) ||
+                _slowFingerprints.IsExcluded(requestKey, getPathKey, options) ||
+                !CanAnalyzeResponse(context.Response))
             {
                 await CopyResponseAsync(bufferedBody, originalBody);
                 return;
@@ -87,6 +99,24 @@ public sealed class CacheAnalyzerMiddleware
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
             {
+                if (Volatile.Read(ref _analysisStopped) != 0 ||
+                    _slowFingerprints.IsExcluded(requestKey, getPathKey, options))
+                {
+                    await originalBody.WriteAsync(responseBytes, context.RequestAborted);
+                    return;
+                }
+                if (_slowFingerprints.Record(requestKey, getPathKey, options))
+                {
+                    if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
+                    {
+                        ClearAnalysis(history);
+                        logger.LogInformation(
+                            "Cache analysis stopped after exceeding the limit of {MaximumSlowFingerprintRequests} distinct requests with slow fingerprint generation. Fingerprint analysis is too expensive for this API under current conditions; this does not determine whether caching would be beneficial. Retained state was cleared and subsequent requests bypass analysis.",
+                            options.MaximumSlowFingerprintRequests);
+                    }
+                    await originalBody.WriteAsync(responseBytes, context.RequestAborted);
+                    return;
+                }
                 Report(
                     sinks,
                     logger,
@@ -112,7 +142,7 @@ public sealed class CacheAnalyzerMiddleware
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
                 options);
-            if (_capacityReached == 0)
+            if (Volatile.Read(ref _analysisStopped) == 0)
             {
                 Report(
                     sinks,
@@ -133,7 +163,7 @@ public sealed class CacheAnalyzerMiddleware
         {
             context.Response.Body = originalBody;
             // A request may have entered Observe concurrently with shutdown.
-            if (_capacityReached != 0) history.Clear();
+            if (Volatile.Read(ref _analysisStopped) != 0) ClearAnalysis(history);
         }
     }
 
@@ -142,18 +172,24 @@ public sealed class CacheAnalyzerMiddleware
         CacheAnalysisOptions options,
         ILogger logger)
     {
-        if (_capacityReached != 0) return true;
+        if (Volatile.Read(ref _analysisStopped) != 0) return true;
         if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
 
-        if (Interlocked.Exchange(ref _capacityReached, 1) == 0)
+        if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
         {
-            history.Clear();
+            ClearAnalysis(history);
             logger.LogInformation(
                 "Cache analysis stopped after reaching the distinct request key limit of {MaximumDistinctRequestKeys}. Retained history was cleared; subsequent requests bypass analysis for this pipeline's lifetime.",
                 options.MaximumDistinctRequestKeys);
         }
 
         return true;
+    }
+
+    private void ClearAnalysis(IResponseFingerprintHistory history)
+    {
+        history.Clear();
+        _slowFingerprints.Clear();
     }
 
     private static async Task<string> CreateRequestKeyAsync(HttpRequest request)

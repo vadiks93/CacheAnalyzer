@@ -4,14 +4,14 @@ namespace CacheAnalyzer.Core;
 
 public sealed class InMemoryResponseFingerprintHistory : IResponseFingerprintHistory
 {
-    // Volatile.Read is intentionally omitted: analysis need not be 100% accurate,
-    // so a concurrent reader using an older table and missing observations is acceptable.
+    // Publish replacement tables across threads; observations remain best effort.
     private ConcurrentDictionary<string, ConcurrentQueue<Observation>> _observations =
         new(StringComparer.Ordinal);
 
-    public int GetCountDistinctRequests() => _observations.Count;
+    public int GetCountDistinctRequests() => System.Threading.Volatile.Read(ref _observations).Count;
 
-    public void Clear() => _observations = new(StringComparer.Ordinal);
+    public void Clear() => System.Threading.Interlocked.Exchange(
+        ref _observations, new ConcurrentDictionary<string, ConcurrentQueue<Observation>>(StringComparer.Ordinal));
 
     public FingerprintHistoryResult Observe(
         string requestKey,
@@ -28,7 +28,7 @@ public sealed class InMemoryResponseFingerprintHistory : IResponseFingerprintHis
 
         // Capacity policy belongs to the caller. Clearing detaches this table so
         // writers already using it cannot repopulate the replacement table.
-        var table = _observations;
+        var table = System.Threading.Volatile.Read(ref _observations);
         var observations = table.GetOrAdd(requestKey, static _ => new ConcurrentQueue<Observation>());
 
         observations.Enqueue(new Observation(fingerprint, observedAt));

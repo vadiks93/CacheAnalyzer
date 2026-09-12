@@ -34,6 +34,8 @@ builder.Services.AddCacheAnalyzer(options =>
     options.EndpointSelection = EndpointSelectionMode.AttributedEndpoints;
     options.MaximumPayloadBytes = 1024 * 1024;
     options.MaximumFingerprintDuration = TimeSpan.FromMilliseconds(25);
+    options.MaximumSlowFingerprintRequests = 500;
+    options.SlowFingerprintVariantsPerPath = 50;
     options.MaximumDistinctRequestKeys = 350;
     options.MaximumObservationsPerKey = 1_000;
     options.MinimumObservationsPerKey = 10;
@@ -91,6 +93,12 @@ control.Enable();
 Analysis runs independently of client conditional headers. The API retains ownership of its status, headers, and complete body, including any existing ETag or 304 behavior. A response becomes a cache candidate when enough retained observations match and the payload is sufficiently larger than its internal fingerprint. Oversized payloads and slow fingerprint generation are reported without affecting the response.
 
 The current adapter buffers responses before forwarding them and buffers QUERY input to calculate a key. This adds memory and latency overhead; MaximumPayloadBytes limits hashing, not response buffering. Streaming, explicit flush/start operations, and custom body features need further compatibility work before enabling analysis broadly. Prefer endpoint opt-in for ordinary buffered APIs.
+
+When fingerprint generation exceeds `MaximumFingerprintDuration`, the adapter reports `FingerprintTooSlow` and excludes that exact request key from later response analysis. GET exclusions include the full query string and are checked before response buffering or hashing. After `SlowFingerprintVariantsPerPath` (default 50) distinct slow GET URLs share the same origin and path, all GET query variants for that path are excluded, including variants that could be cheaper. Only query strings are ignored for this escalation: different path IDs and hosts remain separate. Repeats of already excluded requests do not increment the count. QUERY exclusions retain body and content-metadata identity; forming that key still requires request-body buffering and hashing, and QUERY requests do not escalate to path exclusions.
+
+The slow-request store retains up to `MaximumSlowFingerprintRequests` (default 500) exact keys, independently of normal observation history. Another distinct slow key triggers one Information log, clears history and exclusions, and permanently bypasses the analyzer. Path counters are also bounded by this store. Excluded keys remain retained after path escalation so repeated escalation across different paths cannot evade the overall limit. Concurrent admission may temporarily overshoot and in-flight analysis may finish. Exclusions have no automatic retry or expiry; restart the pipeline to begin fresh.
+
+The duration check measures elapsed time after fingerprint generation finishes; it cannot interrupt hashing already underway. CPU contention, thread scheduling, GC pauses, first-call initialization/JIT, and custom provider work can contribute to the measured duration even below the payload-size limit. The built-in provider measures hashing plus its setup and fingerprint-string conversion, not endpoint execution or response buffering. Slow fingerprint analysis does not establish that the API would be a poor caching candidate.
 
 The middleware defaults to a limit of 350 distinct request keys (`MaximumDistinctRequestKeys`, formerly `MaximumTrackedRequests`), with history retaining up to 1,000 observations per key (`MaximumObservationsPerKey`). `MinimumObservationsPerKey` defaults to 10 and controls the evidence needed for a recommendation; keep it at or below the observation maximum. The middleware checks `GetCountDistinctRequests()` before analysis and observation, and after recording an observation. Once the limit is detected, it logs one Information message, clears history, and permanently bypasses analysis for that middleware instance. Later requests go directly to the next handler without analyzer buffering, hashing, observations, or reports. Runtime enablement or increasing the limit does not reset this stop; recreate the pipeline (normally by restarting the application) to analyze again. The middleware remains registered in the built pipeline.
 

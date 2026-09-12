@@ -75,7 +75,7 @@ All routes below use GET under `/api/scenarios/` on either port:
 | `binary-file` | 256 KiB of deterministic binary bytes, downloaded as `sample.bin` | Stable; candidate after 3 observations |
 | `oversized-file` | 4 MiB download | `PayloadTooLarge` with the default 3 MiB hashing limit; full download still returned |
 
-Recommendations assume fingerprinting finishes within the configured duration. Slow hashing is reported separately. The oversized payload is still buffered: the hashing limit does not cap buffering memory.
+Recommendations assume fingerprinting finishes within the configured duration. Slow hashing is reported separately and excludes that exact request from subsequent response analysis. After 50 distinct slow GET query variants on the same origin/path, the path is excluded. The slow-key store retains 500 keys; another distinct slow key stops the analyzer, logs once, and clears retained analysis state. Both samples apply this policy, with approximate concurrent accounting. The oversized payload is still buffered: the hashing limit does not cap buffering memory.
 
 The ASP.NET Core sample enables Debug logging for the analysis sink in `appsettings.json`, so first observations and changing responses appear alongside candidate reports. When launching its DLL directly, use the sample output directory as the working directory so that configuration is loaded. `dotnet run --project` uses the project directory automatically.
 

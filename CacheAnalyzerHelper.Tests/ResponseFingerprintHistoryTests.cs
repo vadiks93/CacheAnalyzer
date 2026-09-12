@@ -8,7 +8,7 @@ public sealed class ResponseFingerprintHistoryTests
     public void Defaults_BoundKeysAndObservations()
     {
         var options = new CacheAnalysisOptions();
-        Assert.Equal(200, options.MaximumDistinctRequestKeys);
+        Assert.Equal(350, options.MaximumDistinctRequestKeys);
         Assert.Equal(1_000, options.MaximumObservationsPerKey);
         Assert.Equal(10, options.MinimumObservationsPerKey);
     }

@@ -281,6 +281,112 @@ public sealed class CacheAnalyzerMiddlewareTests
     }
 
     [Fact]
+    public async Task SlowExactUrl_BypassesRepeatButAllowsOtherQueryVariants()
+    {
+        var options = new CacheAnalysisOptions { MaximumFingerprintDuration = TimeSpan.FromMilliseconds(1) };
+        var history = new InMemoryResponseFingerprintHistory();
+        var sink = new CollectingSink();
+        var bypass = false;
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            if (bypass) Assert.Same(ctx.Items["originalBody"], ctx.Response.Body);
+            ctx.Response.ContentType = "application/json";
+            ctx.Response.ContentLength = Encoding.UTF8.GetByteCount(ResponseJson);
+            ctx.Response.StatusCode = 202;
+            ctx.Response.Headers.ETag = "\"owned\"";
+            await ctx.Response.WriteAsync(ResponseJson);
+        });
+        var first = CreateContext();
+        first.Request.QueryString = new QueryString("?id=1");
+        await InvokeAsync(middleware, first, new SlowFingerprintProvider(), history, options, [sink]);
+
+        bypass = true;
+        var repeat = CreateContext();
+        repeat.Request.QueryString = first.Request.QueryString;
+        repeat.Items["originalBody"] = repeat.Response.Body;
+        await InvokeAsync(middleware, repeat, new ThrowingFingerprintProvider(), history, options, [sink]);
+        Assert.Equal(ResponseJson, ReadBody(repeat));
+        Assert.Equal(202, repeat.Response.StatusCode);
+        Assert.Equal("application/json", repeat.Response.ContentType);
+        Assert.Equal((long)Encoding.UTF8.GetByteCount(ResponseJson), repeat.Response.ContentLength);
+        Assert.Equal("\"owned\"", repeat.Response.Headers.ETag);
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Single(sink.Analyses);
+
+        bypass = false;
+        options.MaximumFingerprintDuration = TimeSpan.MaxValue;
+        var different = CreateContext();
+        different.Request.QueryString = new QueryString("?id=2");
+        await InvokeAsync(middleware, different, history: history, options: options, sinks: [sink]);
+        Assert.Equal(2, sink.Analyses.Count);
+        Assert.Equal(CacheRecommendation.FirstObservation, sink.Analyses[1].Recommendation);
+    }
+
+    [Fact]
+    public async Task SlowQueryVariants_ExcludeSamePathOnlyAtThreshold()
+    {
+        var options = new CacheAnalysisOptions
+        {
+            MaximumFingerprintDuration = TimeSpan.FromMilliseconds(1),
+            SlowFingerprintVariantsPerPath = 2
+        };
+        var sink = new CollectingSink();
+        var middleware = CreateMiddleware();
+        for (var i = 0; i < 2; i++)
+        {
+            var context = CreateContext();
+            context.Request.Path = "/products";
+            context.Request.QueryString = new QueryString("?id=" + i);
+            await InvokeAsync(middleware, context, new SlowFingerprintProvider(), options: options, sinks: [sink]);
+        }
+        var excluded = CreateContext();
+        excluded.Request.Path = "/products";
+        excluded.Request.QueryString = new QueryString("?id=unseen");
+        await InvokeAsync(middleware, excluded, new ThrowingFingerprintProvider(), options: options, sinks: [sink]);
+        Assert.Equal(ResponseJson, ReadBody(excluded));
+        Assert.Equal(2, sink.Analyses.Count);
+
+        options.MaximumFingerprintDuration = TimeSpan.MaxValue;
+        var otherPath = CreateContext();
+        otherPath.Request.Path = "/products/123";
+        await InvokeAsync(middleware, otherPath, options: options, sinks: [sink]);
+        Assert.Equal(3, sink.Analyses.Count);
+    }
+
+    [Fact]
+    public async Task TooManySlowRequests_StopGloballyLogOnceAndClearHistory()
+    {
+        var history = new InMemoryResponseFingerprintHistory();
+        var options = new CacheAnalysisOptions
+        {
+            MaximumFingerprintDuration = TimeSpan.FromMilliseconds(1),
+            MaximumSlowFingerprintRequests = 2
+        };
+        history.Observe("previous-fast", "A", 100, DateTimeOffset.UtcNow, options);
+        var sink = new CollectingSink();
+        var logger = new CollectingLogger();
+        var middleware = CreateMiddleware();
+        for (var i = 0; i < 3; i++)
+        {
+            var context = CreateContext();
+            context.Request.Path = "/slow/" + i;
+            await InvokeAsync(middleware, context, new SlowFingerprintProvider(), history, options, [sink], logger: logger);
+            Assert.Equal(ResponseJson, ReadBody(context));
+        }
+        for (var i = 0; i < 100; i++)
+        {
+            var context = CreateContext();
+            context.Request.Path = "/later/" + i;
+            await InvokeAsync(middleware, context, new ThrowingFingerprintProvider(), history, options, [sink], logger: logger);
+            Assert.Equal(ResponseJson, ReadBody(context));
+        }
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Equal(2, sink.Analyses.Count);
+        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+        Assert.Contains("slow fingerprint", Assert.Single(logger.Messages));
+    }
+
+    [Fact]
     public async Task SlowFingerprint_IsReportedAndDoesNotEmitETag()
     {
         var context = CreateContext();
@@ -459,10 +565,15 @@ public sealed class CacheAnalyzerMiddlewareTests
     private sealed class CollectingLogger : ILogger<CacheAnalyzerMiddleware>
     {
         public System.Collections.Concurrent.ConcurrentQueue<LogLevel> Levels { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<string> Messages { get; } = new();
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter) => Levels.Enqueue(logLevel);
+            Func<TState, Exception?, string> formatter)
+        {
+            Levels.Enqueue(logLevel);
+            Messages.Enqueue(formatter(state, exception));
+        }
     }
 
     private sealed class CollectingSink : IResponseAnalysisSink

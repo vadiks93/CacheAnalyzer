@@ -17,9 +17,10 @@ namespace CacheAnalyzer.Sample.NetFramework
     {
         private readonly IResponseFingerprintProvider fingerprints = new Sha256ResponseFingerprintProvider();
         private readonly IResponseFingerprintHistory history = new InMemoryResponseFingerprintHistory();
-        // Volatile.Read is intentionally omitted: delayed visibility and a few extra or
-        // missed observations are acceptable. Only the one-time log needs an atomic transition.
-        private int capacityReached;
+        private readonly SlowFingerprintExclusions slowFingerprints = new SlowFingerprintExclusions();
+        // Volatile reads provide cross-thread visibility of shutdown without locking.
+        // In-flight analysis remains best effort; the atomic transition selects one logger.
+        private int analysisStopped;
         private readonly CacheAnalysisOptions options = new CacheAnalysisOptions
         {
             MinimumObservationsPerKey = 3,
@@ -30,7 +31,7 @@ namespace CacheAnalyzer.Sample.NetFramework
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            if (capacityReached != 0)
+            if (Volatile.Read(ref analysisStopped) != 0)
                 return await base.SendAsync(request, cancellationToken);
 
             var isQuery = request.Method.Method == "QUERY";
@@ -56,8 +57,13 @@ namespace CacheAnalyzer.Sample.NetFramework
                         });
                 }
 
+                var getPathKey = isQuery ? null : "GET " + request.RequestUri.GetLeftPart(UriPartial.Path);
+                if (slowFingerprints.IsExcluded(key, getPathKey, options))
+                    return await base.SendAsync(request, cancellationToken);
+
                 var response = await base.SendAsync(request, cancellationToken);
-                if (StopAtCapacity() || !response.IsSuccessStatusCode || response.Content == null || response.Headers.CacheControl?.NoStore == true)
+                if (StopAtCapacity() || slowFingerprints.IsExcluded(key, getPathKey, options) ||
+                    !response.IsSuccessStatusCode || response.Content == null || response.Headers.CacheControl?.NoStore == true)
                     return response;
 
                 var bytes = await response.Content.ReadAsByteArrayAsync();
@@ -71,33 +77,50 @@ namespace CacheAnalyzer.Sample.NetFramework
                 watch.Stop();
                 if (watch.Elapsed > options.MaximumFingerprintDuration)
                 {
+                    if (Volatile.Read(ref analysisStopped) != 0 || slowFingerprints.IsExcluded(key, getPathKey, options))
+                        return response;
+                    if (slowFingerprints.Record(key, getPathKey, options))
+                    {
+                        if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
+                        {
+                            ClearAnalysis();
+                            Console.WriteLine("Cache analysis stopped after exceeding {0} distinct slow fingerprint requests. Fingerprint analysis is too expensive under current conditions; this does not determine whether caching would be beneficial. Retained state cleared; subsequent requests bypass analysis.", options.MaximumSlowFingerprintRequests);
+                        }
+                        return response;
+                    }
                     Console.WriteLine("{0}: {1}, {2} bytes", key, CacheRecommendation.FingerprintTooSlow, bytes.Length);
                     return response;
                 }
 
                 if (StopAtCapacity()) return response;
                 var observation = history.Observe(key, fingerprint, bytes.LongLength, DateTimeOffset.UtcNow, options);
-                if (capacityReached == 0)
+                if (Volatile.Read(ref analysisStopped) == 0)
                     Console.WriteLine("{0}: {1}, {2} bytes", key, observation.Recommendation, bytes.Length);
                 StopAtCapacity();
                 return response;
             }
             finally
             {
-                if (capacityReached != 0) history.Clear();
+                if (Volatile.Read(ref analysisStopped) != 0) ClearAnalysis();
             }
         }
 
         private bool StopAtCapacity()
         {
-            if (capacityReached != 0) return true;
+            if (Volatile.Read(ref analysisStopped) != 0) return true;
             if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
-            if (Interlocked.Exchange(ref capacityReached, 1) == 0)
+            if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
             {
-                history.Clear();
+                ClearAnalysis();
                 Console.WriteLine("Cache analysis stopped at the distinct request key limit of {0}. History cleared; subsequent requests bypass analysis.", options.MaximumDistinctRequestKeys);
             }
             return true;
+        }
+
+        private void ClearAnalysis()
+        {
+            history.Clear();
+            slowFingerprints.Clear();
         }
     }
 }

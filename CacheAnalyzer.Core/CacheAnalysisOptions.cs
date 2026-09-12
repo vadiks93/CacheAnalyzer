@@ -11,6 +11,19 @@ public sealed class CacheAnalysisOptions
     public TimeSpan MaximumFingerprintDuration { get; set; } = TimeSpan.FromMilliseconds(25);
 
     /// <summary>
+    /// Maximum retained exact slow-request keys, default 500. Another distinct slow
+    /// request stops analysis and clears retained state. Concurrent admission is best effort.
+    /// </summary>
+    public int MaximumSlowFingerprintRequests { get; set; } = 500;
+
+    /// <summary>
+    /// Distinct slow GET URLs sharing an origin and path needed to exclude that path,
+    /// ignoring query parameters. Defaults to 50. QUERY bodies do not contribute.
+    /// Exclusions last for the adapter instance's lifetime.
+    /// </summary>
+    public int SlowFingerprintVariantsPerPath { get; set; } = 50;
+
+    /// <summary>
     /// Gets or sets the maximum number of distinct request keys retained in memory.
     /// Defaults to 350. The middleware checks this limit outside history and permanently
     /// bypasses analysis once reached, logs once, and clears retained history.
