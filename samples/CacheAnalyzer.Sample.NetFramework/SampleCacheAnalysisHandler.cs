@@ -62,7 +62,7 @@ namespace CacheAnalyzer.Sample.NetFramework
                     return await base.SendAsync(request, cancellationToken);
 
                 var response = await base.SendAsync(request, cancellationToken);
-                if (StopAtCapacity() || slowFingerprints.IsExcluded(key, getPathKey, options) ||
+                if (Volatile.Read(ref analysisStopped) != 0 ||
                     !response.IsSuccessStatusCode || response.Content == null || response.Headers.CacheControl?.NoStore == true)
                     return response;
 
@@ -77,8 +77,6 @@ namespace CacheAnalyzer.Sample.NetFramework
                 watch.Stop();
                 if (watch.Elapsed > options.MaximumFingerprintDuration)
                 {
-                    if (Volatile.Read(ref analysisStopped) != 0 || slowFingerprints.IsExcluded(key, getPathKey, options))
-                        return response;
                     if (slowFingerprints.Record(key, getPathKey, options))
                     {
                         if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
@@ -92,10 +90,9 @@ namespace CacheAnalyzer.Sample.NetFramework
                     return response;
                 }
 
-                if (StopAtCapacity()) return response;
+                // Hashing already started; allow late observations and clean up in finally.
                 var observation = history.Observe(key, fingerprint, bytes.LongLength, DateTimeOffset.UtcNow, options);
-                if (Volatile.Read(ref analysisStopped) == 0)
-                    Console.WriteLine("{0}: {1}, {2} bytes", key, observation.Recommendation, bytes.Length);
+                Console.WriteLine("{0}: {1}, {2} bytes", key, observation.Recommendation, bytes.Length);
                 StopAtCapacity();
                 return response;
             }
@@ -107,7 +104,6 @@ namespace CacheAnalyzer.Sample.NetFramework
 
         private bool StopAtCapacity()
         {
-            if (Volatile.Read(ref analysisStopped) != 0) return true;
             if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
             if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
             {

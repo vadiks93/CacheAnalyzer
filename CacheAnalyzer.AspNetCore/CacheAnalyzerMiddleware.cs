@@ -68,9 +68,7 @@ public sealed class CacheAnalyzerMiddleware
         {
             await _next(context);
 
-            if (StopAtCapacity(history, options, logger) ||
-                _slowFingerprints.IsExcluded(requestKey, getPathKey, options) ||
-                !CanAnalyzeResponse(context.Response))
+            if (Volatile.Read(ref _analysisStopped) != 0 || !CanAnalyzeResponse(context.Response))
             {
                 await CopyResponseAsync(bufferedBody, originalBody);
                 return;
@@ -99,12 +97,6 @@ public sealed class CacheAnalyzerMiddleware
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
             {
-                if (Volatile.Read(ref _analysisStopped) != 0 ||
-                    _slowFingerprints.IsExcluded(requestKey, getPathKey, options))
-                {
-                    await originalBody.WriteAsync(responseBytes, context.RequestAborted);
-                    return;
-                }
                 if (_slowFingerprints.Record(requestKey, getPathKey, options))
                 {
                     if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
@@ -130,30 +122,23 @@ public sealed class CacheAnalyzerMiddleware
                 return;
             }
 
-            if (StopAtCapacity(history, options, logger))
-            {
-                await originalBody.WriteAsync(responseBytes, context.RequestAborted);
-                return;
-            }
-
+            // Once hashing has started, let this request finish analysis and reporting.
+            // Shutdown may overlap; the finally block releases any late observations.
             var historyResult = history.Observe(
                 requestKey,
                 fingerprint,
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
                 options);
-            if (Volatile.Read(ref _analysisStopped) == 0)
-            {
-                Report(
-                    sinks,
-                    logger,
-                    new ResponseAnalysis(
-                        requestKey,
-                        historyResult.Recommendation,
-                        responseBytes.LongLength,
-                        stopwatch.Elapsed,
-                        fingerprint));
-            }
+            Report(
+                sinks,
+                logger,
+                new ResponseAnalysis(
+                    requestKey,
+                    historyResult.Recommendation,
+                    responseBytes.LongLength,
+                    stopwatch.Elapsed,
+                    fingerprint));
 
             StopAtCapacity(history, options, logger);
 
@@ -172,7 +157,6 @@ public sealed class CacheAnalyzerMiddleware
         CacheAnalysisOptions options,
         ILogger logger)
     {
-        if (Volatile.Read(ref _analysisStopped) != 0) return true;
         if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
 
         if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
