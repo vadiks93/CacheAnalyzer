@@ -24,7 +24,7 @@ namespace CacheAnalyzer.Sample.NetFramework
         private readonly CacheAnalysisOptions options = new CacheAnalysisOptions
         {
             MinimumObservationsPerKey = 3,
-            MinimumPayloadToFingerprintRatio = 0,
+            MinimumPayloadToFingerprintRatio = 10,
             MaximumDistinctRequestKeys = 200,
             MaximumObservationsPerKey = 1_000
         };

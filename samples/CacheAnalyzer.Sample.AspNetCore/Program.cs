@@ -9,7 +9,7 @@ builder.Services.AddControllers();
 builder.Services.AddCacheAnalyzer(options =>
 {
     options.MinimumObservationsPerKey = 3;
-    options.MinimumPayloadToFingerprintRatio = 0;
+    options.MinimumPayloadToFingerprintRatio = 10;
     options.MaximumDistinctRequestKeys = 200;
     options.MaximumObservationsPerKey = 1_000;
 });

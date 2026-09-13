@@ -2,6 +2,30 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": ".NET: Debug sample ASP.NET Core API",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzer.Sample.AspNetCore",
+      "program": "${workspaceFolder}/samples/CacheAnalyzer.Sample.AspNetCore/bin/Debug/net10.0/CacheAnalyzer.Sample.AspNetCore.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/samples/CacheAnalyzer.Sample.AspNetCore",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false
+    },
+    {
+      "name": ".NET Framework: Debug sample API",
+      "type": "clr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzer.Sample.NetFramework",
+      "program": "${workspaceFolder}/samples/CacheAnalyzer.Sample.NetFramework/bin/Debug/net48/CacheAnalyzer.Sample.NetFramework.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/samples/CacheAnalyzer.Sample.NetFramework",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false
+    },
+    {
       "name": ".NET: Debug woven test code (LamaDebug)",
       "type": "coreclr",
       "request": "launch",

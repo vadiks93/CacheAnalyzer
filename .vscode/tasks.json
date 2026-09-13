@@ -2,6 +2,30 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "build CacheAnalyzer.Sample.AspNetCore",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/samples/CacheAnalyzer.Sample.AspNetCore/CacheAnalyzer.Sample.AspNetCore.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "build CacheAnalyzer.Sample.NetFramework",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/samples/CacheAnalyzer.Sample.NetFramework/CacheAnalyzer.Sample.NetFramework.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
       "label": "build CacheAnalyzerHelper.Tests (LamaDebug)",
       "type": "process",
       "command": "dotnet",

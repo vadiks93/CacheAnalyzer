@@ -6,6 +6,12 @@ public sealed class CacheAnalysisOptions
 
     public EndpointSelectionMode EndpointSelection { get; set; } = EndpointSelectionMode.AttributedEndpoints;
 
+    /// <summary>
+    /// Maximum response size eligible for hashing. The ASP.NET Core adapter also
+    /// caps capture capacity at this limit, forwarding oversized responses without
+    /// analysis. Eligible responses allocate a separate copy for hashing; this is
+    /// not a total memory limit or a limit on QUERY request-body buffering.
+    /// </summary>
     public long MaximumPayloadBytes { get; set; } = 1024 * 1024 * 3;
 
     public TimeSpan MaximumFingerprintDuration { get; set; } = TimeSpan.FromMilliseconds(25);

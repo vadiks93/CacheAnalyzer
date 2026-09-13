@@ -512,6 +512,55 @@ public sealed class CacheAnalyzerMiddlewareTests
         });
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task OversizedResponse_PassesThroughDuringWrites(bool declaredLength, bool synchronous)
+    {
+        var context = CreateContext();
+        var original = (MemoryStream)context.Response.Body;
+        var sink = new CollectingSink();
+        var history = new InMemoryResponseFingerprintHistory();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            ctx.Response.ContentType = "application/octet-stream";
+            ctx.Response.Headers.ETag = "\"original\"";
+            if (declaredLength) ctx.Response.ContentLength = 9;
+            for (var i = 0; i < 3; i++)
+            {
+                var chunk = new byte[] { (byte)(i * 3), (byte)(i * 3 + 1), (byte)(i * 3 + 2) };
+                if (synchronous) ctx.Response.Body.Write(chunk, 0, chunk.Length);
+                else await ctx.Response.Body.WriteAsync(chunk.AsMemory());
+                Assert.Equal(declaredLength || i > 0 ? (i + 1) * 3L : 0L, original.Length);
+            }
+        });
+
+        await InvokeAsync(middleware, context, new ThrowingFingerprintProvider(), history,
+            new CacheAnalysisOptions { MaximumPayloadBytes = 5 }, [sink]);
+
+        Assert.Same(original, context.Response.Body);
+        Assert.Equal(Enumerable.Range(0, 9).Select(i => (byte)i).ToArray(), original.ToArray());
+        Assert.Equal(declaredLength ? 9L : (long?)null, context.Response.ContentLength);
+        Assert.Equal("application/octet-stream", context.Response.ContentType);
+        Assert.Equal("\"original\"", context.Response.Headers.ETag);
+        Assert.Equal(CacheRecommendation.PayloadTooLarge, Assert.Single(sink.Analyses).Recommendation);
+        Assert.Equal(0, history.GetCountDistinctRequests());
+    }
+
+    [Fact]
+    public async Task ResponseExactlyAtLimit_IsStillAnalyzed()
+    {
+        var context = CreateContext();
+        var sink = new CollectingSink();
+        await InvokeAsync(CreateMiddleware(), context,
+            options: new CacheAnalysisOptions { MaximumPayloadBytes = Encoding.UTF8.GetByteCount(ResponseJson) },
+            sinks: [sink]);
+        Assert.Equal(CacheRecommendation.FirstObservation, Assert.Single(sink.Analyses).Recommendation);
+        Assert.Equal(ResponseJson, ReadBody(context));
+    }
+
     private static DefaultHttpContext CreateContext(string? etag = null, bool tagged = true)
     {
         var context = new DefaultHttpContext();

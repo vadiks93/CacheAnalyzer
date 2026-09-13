@@ -61,7 +61,7 @@ public sealed class CacheAnalyzerMiddleware
         }
         var originalBody = context.Response.Body;
 
-        await using var bufferedBody = new MemoryStream();
+        await using var bufferedBody = new LimitedResponseBuffer(originalBody, context.Response, options.MaximumPayloadBytes);
         context.Response.Body = bufferedBody;
 
         try
@@ -70,13 +70,11 @@ public sealed class CacheAnalyzerMiddleware
 
             if (Volatile.Read(ref _analysisStopped) != 0 || !CanAnalyzeResponse(context.Response))
             {
-                await CopyResponseAsync(bufferedBody, originalBody);
+                await bufferedBody.CopyBufferedToAsync(context.RequestAborted);
                 return;
             }
 
-            var responseBytes = bufferedBody.ToArray();
-
-            if (responseBytes.LongLength > options.MaximumPayloadBytes)
+            if (bufferedBody.ExceededLimit)
             {
                 Report(
                     sinks,
@@ -84,13 +82,13 @@ public sealed class CacheAnalyzerMiddleware
                     new ResponseAnalysis(
                         requestKey,
                         CacheRecommendation.PayloadTooLarge,
-                        responseBytes.LongLength,
+                        bufferedBody.BytesWritten,
                         TimeSpan.Zero,
                         null));
-                await originalBody.WriteAsync(responseBytes, context.RequestAborted);
                 return;
             }
 
+            var responseBytes = bufferedBody.ToArray();
             var stopwatch = Stopwatch.StartNew();
             var fingerprint = fingerprintProvider.CreateFingerprint(responseBytes);
             stopwatch.Stop();
@@ -245,9 +243,4 @@ public sealed class CacheAnalyzerMiddleware
                    value => value?.Contains("no-store", StringComparison.OrdinalIgnoreCase) == true);
     }
 
-    private static async Task CopyResponseAsync(Stream source, Stream destination)
-    {
-        source.Position = 0;
-        await source.CopyToAsync(destination);
-    }
 }
