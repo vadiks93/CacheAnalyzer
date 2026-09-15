@@ -17,7 +17,7 @@ namespace CacheAnalyzer.Samples
             {
                 case "large-json":
                     var json = new StringBuilder("{\"products\":[");
-                    for (var i = 0; i < 2000; i++)
+                    for (var i = 0; i < 20000; i++)
                     {
                         if (i > 0) json.Append(',');
                         json.Append("{\"id\":").Append(i.ToString(System.Globalization.CultureInfo.InvariantCulture))

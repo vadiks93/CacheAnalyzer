@@ -30,7 +30,8 @@ public sealed class CacheAnalyzerMiddleware
         IEnumerable<IResponseAnalysisSink> sinks,
         ILogger<CacheAnalyzerMiddleware> logger)
     {
-        if (Volatile.Read(ref _analysisStopped) != 0)
+        #region negative scenarios where analysis is stopped or cannot be analysed
+        if (IsAnalysisStopped())
         {
             await _next(context);
             return;
@@ -49,6 +50,7 @@ public sealed class CacheAnalyzerMiddleware
             return;
         }
 
+
         var requestKey = await CreateRequestKeyAsync(context.Request);
         // Group only GET query variants; QUERY request bodies retain their own identity.
         var getPathKey = HttpMethods.IsGet(context.Request.Method)
@@ -59,6 +61,8 @@ public sealed class CacheAnalyzerMiddleware
             await _next(context);
             return;
         }
+        #endregion
+
         var originalBody = context.Response.Body;
 
         await using var bufferedBody = new LimitedResponseBuffer(originalBody, context.Response, options.MaximumPayloadBytes);
@@ -68,7 +72,7 @@ public sealed class CacheAnalyzerMiddleware
         {
             await _next(context);
 
-            if (Volatile.Read(ref _analysisStopped) != 0 || !CanAnalyzeResponse(context.Response))
+            if (IsAnalysisStopped() || !CanAnalyzeResponse(context.Response))
             {
                 await bufferedBody.CopyBufferedToAsync(context.RequestAborted);
                 return;
@@ -146,7 +150,7 @@ public sealed class CacheAnalyzerMiddleware
         {
             context.Response.Body = originalBody;
             // A request may have entered Observe concurrently with shutdown.
-            if (Volatile.Read(ref _analysisStopped) != 0) ClearAnalysis(history);
+            if (IsAnalysisStopped()) ClearAnalysis(history);
         }
     }
 
@@ -166,6 +170,11 @@ public sealed class CacheAnalyzerMiddleware
         }
 
         return true;
+    }
+
+    private bool IsAnalysisStopped()
+    {
+        return Volatile.Read(ref _analysisStopped) != 0;
     }
 
     private void ClearAnalysis(IResponseFingerprintHistory history)
