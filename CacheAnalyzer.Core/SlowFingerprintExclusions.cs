@@ -11,33 +11,45 @@ public sealed class SlowFingerprintExclusions
     public bool IsExcluded(string requestKey, string? getPathKey, CacheAnalysisOptions options)
     {
         var state = Volatile.Read(ref _state);
-        return state.Requests.ContainsKey(requestKey) ||
-            (getPathKey is not null && state.Paths.TryGetValue(getPathKey, out var count) &&
-             count >= options.SlowFingerprintVariantsPerPath);
+        return state.Groups.TryGetValue(getPathKey ?? requestKey, out var group) &&
+            (Volatile.Read(ref group.Excluded) != 0 || group.Requests.ContainsKey(requestKey));
     }
 
     /// <summary>
-    /// Records a distinct slow request. Returns true when the caller should stop analysis.
+    /// Records a distinct slow request, reporting path exclusion or overall capacity overflow.
     /// Previously excluded requests do not count again. Concurrent admission can overshoot.
     /// </summary>
-    public bool Record(string requestKey, string? getPathKey, CacheAnalysisOptions options)
+    public SlowFingerprintRecordResult Record(string requestKey, string? getPathKey, CacheAnalysisOptions options)
     {
         var state = Volatile.Read(ref _state);
-        if (IsExcluded(requestKey, getPathKey, options)) return false;
-        if (state.Requests.Count >= options.MaximumSlowFingerprintRequests) return true;
-        if (state.Requests.TryAdd(requestKey, 0) && getPathKey is not null)
+        var groupKey = getPathKey ?? requestKey;
+        if (!state.Groups.TryGetValue(groupKey, out var group))
         {
-            state.Paths.AddOrUpdate(getPathKey, 1, static (_, count) => count + 1);
+            if (state.Groups.Count >= options.MaximumSlowFingerprintRequests)
+                return SlowFingerprintRecordResult.CapacityExceeded;
+            group = state.Groups.GetOrAdd(groupKey, static _ => new Group());
         }
-
-        return state.Requests.Count > options.MaximumSlowFingerprintRequests;
+        if (state.Groups.Count > options.MaximumSlowFingerprintRequests)
+            return SlowFingerprintRecordResult.CapacityExceeded;
+        if (Volatile.Read(ref group.Excluded) != 0) return SlowFingerprintRecordResult.Recorded;
+        group.Requests.TryAdd(requestKey, 0);
+        var newlyExcluded = getPathKey is not null &&
+            group.Requests.Count > options.MaximumSlowFingerprintRequestsPerPath &&
+            Interlocked.Exchange(ref group.Excluded, 1) == 0;
+        if (Volatile.Read(ref group.Excluded) != 0) group.Requests.Clear();
+        return newlyExcluded ? SlowFingerprintRecordResult.PathExcluded : SlowFingerprintRecordResult.Recorded;
     }
 
     public void Clear() => Interlocked.Exchange(ref _state, new State());
 
     private sealed class State
     {
+        public ConcurrentDictionary<string, Group> Groups { get; } = new(StringComparer.Ordinal);
+    }
+
+    private sealed class Group
+    {
         public ConcurrentDictionary<string, byte> Requests { get; } = new(StringComparer.Ordinal);
-        public ConcurrentDictionary<string, int> Paths { get; } = new(StringComparer.Ordinal);
+        public int Excluded;
     }
 }

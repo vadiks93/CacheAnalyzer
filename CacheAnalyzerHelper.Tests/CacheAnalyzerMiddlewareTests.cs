@@ -328,7 +328,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         var options = new CacheAnalysisOptions
         {
             MaximumFingerprintDuration = TimeSpan.FromMilliseconds(1),
-            SlowFingerprintVariantsPerPath = 2
+            MaximumSlowFingerprintRequestsPerPath = 1
         };
         var sink = new CollectingSink();
         var middleware = CreateMiddleware();
@@ -354,7 +354,44 @@ public sealed class CacheAnalyzerMiddlewareTests
     }
 
     [Fact]
-    public async Task TooManySlowRequests_StopGloballyLogOnceAndClearHistory()
+    public async Task TooManySlowVariants_ExcludeOnlyTheirPathAndPreserveHistory()
+    {
+        var history = new InMemoryResponseFingerprintHistory();
+        var options = new CacheAnalysisOptions
+        {
+            MaximumFingerprintDuration = TimeSpan.FromMilliseconds(1),
+            MaximumSlowFingerprintRequestsPerPath = 2
+        };
+        history.Observe("previous-fast", "A", 100, DateTimeOffset.UtcNow, options);
+        var sink = new CollectingSink();
+        var logger = new CollectingLogger();
+        var middleware = CreateMiddleware();
+        for (var i = 0; i < 3; i++)
+        {
+            var context = CreateContext();
+            context.Request.Path = "/slow";
+            context.Request.QueryString = new QueryString("?id=" + i);
+            await InvokeAsync(middleware, context, new SlowFingerprintProvider(), history, options, [sink], logger: logger);
+            Assert.Equal(ResponseJson, ReadBody(context));
+        }
+        var excluded = CreateContext();
+        excluded.Request.Path = "/slow";
+        excluded.Request.QueryString = new QueryString("?id=unseen");
+        await InvokeAsync(middleware, excluded, new ThrowingFingerprintProvider(), history, options, [sink], logger: logger);
+        Assert.Equal(ResponseJson, ReadBody(excluded));
+        options.MaximumFingerprintDuration = TimeSpan.MaxValue;
+        var other = CreateContext();
+        other.Request.Path = "/other";
+        await InvokeAsync(middleware, other, history: history, options: options, sinks: [sink], logger: logger);
+        Assert.Equal(2, history.GetCountDistinctRequests());
+        Assert.Equal(4, sink.Analyses.Count);
+        Assert.Equal(CacheRecommendation.FirstObservation, sink.Analyses[3].Recommendation);
+        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+        Assert.Contains("/slow", Assert.Single(logger.Messages));
+    }
+
+    [Fact]
+    public async Task TooManySlowPaths_StopGloballyLogOnceAndClearHistory()
     {
         var history = new InMemoryResponseFingerprintHistory();
         var options = new CacheAnalysisOptions
@@ -365,25 +402,43 @@ public sealed class CacheAnalyzerMiddlewareTests
         history.Observe("previous-fast", "A", 100, DateTimeOffset.UtcNow, options);
         var sink = new CollectingSink();
         var logger = new CollectingLogger();
-        var middleware = CreateMiddleware();
+        var bypass = false;
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            if (bypass) Assert.Same(ctx.Items["originalBody"], ctx.Response.Body);
+            ctx.Response.StatusCode = 202;
+            ctx.Response.ContentType = "application/json";
+            ctx.Response.ContentLength = Encoding.UTF8.GetByteCount(ResponseJson);
+            ctx.Response.Headers.ETag = "\"owned\"";
+            await ctx.Response.WriteAsync(ResponseJson);
+        });
         for (var i = 0; i < 3; i++)
         {
             var context = CreateContext();
             context.Request.Path = "/slow/" + i;
             await InvokeAsync(middleware, context, new SlowFingerprintProvider(), history, options, [sink], logger: logger);
             Assert.Equal(ResponseJson, ReadBody(context));
+            Assert.Equal(202, context.Response.StatusCode);
+            Assert.Equal("\"owned\"", context.Response.Headers.ETag);
         }
-        for (var i = 0; i < 100; i++)
+        bypass = true;
+        options.MaximumSlowFingerprintRequests = 100;
+        for (var i = 0; i < 3; i++)
         {
             var context = CreateContext();
             context.Request.Path = "/later/" + i;
+            context.Items["originalBody"] = context.Response.Body;
             await InvokeAsync(middleware, context, new ThrowingFingerprintProvider(), history, options, [sink], logger: logger);
             Assert.Equal(ResponseJson, ReadBody(context));
+            Assert.Equal(202, context.Response.StatusCode);
+            Assert.Equal("application/json", context.Response.ContentType);
+            Assert.Equal((long)Encoding.UTF8.GetByteCount(ResponseJson), context.Response.ContentLength);
+            Assert.Equal("\"owned\"", context.Response.Headers.ETag);
         }
         Assert.Equal(0, history.GetCountDistinctRequests());
         Assert.Equal(2, sink.Analyses.Count);
         Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
-        Assert.Contains("slow fingerprint", Assert.Single(logger.Messages));
+        Assert.Contains("analysis stopped", Assert.Single(logger.Messages));
     }
 
     [Fact]
@@ -533,7 +588,7 @@ public sealed class CacheAnalyzerMiddlewareTests
                 var chunk = new byte[] { (byte)(i * 3), (byte)(i * 3 + 1), (byte)(i * 3 + 2) };
                 if (synchronous) ctx.Response.Body.Write(chunk, 0, chunk.Length);
                 else await ctx.Response.Body.WriteAsync(chunk.AsMemory());
-                Assert.Equal(declaredLength || i > 0 ? (i + 1) * 3L : 0L, original.Length);
+                Assert.Equal((i + 1) * 3L, original.Length);
             }
         });
 
@@ -547,6 +602,126 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal("\"original\"", context.Response.Headers.ETag);
         Assert.Equal(CacheRecommendation.PayloadTooLarge, Assert.Single(sink.Analyses).Recommendation);
         Assert.Equal(0, history.GetCountDistinctRequests());
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(3, true)]
+    public async Task MultipleWrites_WithinLimit_AreAnalyzedWithOrWithoutContentLength(int writeApi, bool declaredLength)
+    {
+        var context = CreateContext();
+        var original = (MemoryStream)context.Response.Body;
+        var sink = new CollectingSink();
+        var history = new InMemoryResponseFingerprintHistory();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            ctx.Response.StatusCode = 202;
+            ctx.Response.ContentType = "application/octet-stream";
+            ctx.Response.Headers.ETag = "\"original\"";
+            if (declaredLength) ctx.Response.ContentLength = 9;
+            for (var i = 0; i < 3; i++)
+            {
+
+                var chunk = new byte[] { (byte)(i * 3), (byte)(i * 3 + 1), (byte)(i * 3 + 2) };
+                switch (writeApi)
+                {
+                    case 0: ctx.Response.Body.Write(chunk, 0, chunk.Length); break;
+                    case 1: ctx.Response.Body.Write(chunk.AsSpan()); break;
+                    case 2: await ctx.Response.Body.WriteAsync(chunk, 0, chunk.Length, CancellationToken.None); break;
+                    case 3: await ctx.Response.Body.WriteAsync(chunk.AsMemory()); break;
+                }
+                Assert.Equal((i + 1) * 3L, original.Length);
+            }
+        });
+
+        var provider = new Sha256ResponseFingerprintProvider();
+        await InvokeAsync(middleware, context, provider, history,
+            new CacheAnalysisOptions { MaximumPayloadBytes = 9, MaximumFingerprintDuration = TimeSpan.FromSeconds(10) },
+            [sink]);
+
+        Assert.Same(original, context.Response.Body);
+        Assert.Equal(Enumerable.Range(0, 9).Select(i => (byte)i).ToArray(), original.ToArray());
+        Assert.Equal(declaredLength ? 9L : (long?)null, context.Response.ContentLength);
+        Assert.Equal(202, context.Response.StatusCode);
+        Assert.Equal("application/octet-stream", context.Response.ContentType);
+        Assert.Equal("\"original\"", context.Response.Headers.ETag);
+        var analysis = Assert.Single(sink.Analyses);
+        Assert.Equal(CacheRecommendation.FirstObservation, analysis.Recommendation);
+        Assert.Equal(9, analysis.PayloadBytes);
+        Assert.Equal(1, history.GetCountDistinctRequests());
+        Assert.Equal(provider.CreateFingerprint(original.ToArray()), analysis.Fingerprint);
+    }
+
+    [Theory]
+    [InlineData(0, 9)]
+    [InlineData(1, 9)]
+    [InlineData(2, 9)]
+    [InlineData(0, 5)]
+    [InlineData(1, 5)]
+    [InlineData(2, 5)]
+    public async Task Flushes_ForwardProgressAndRetainOnlyEligibleAnalysis(int writeApi, int limit)
+    {
+        var context = CreateContext();
+        using var destination = new FlushTrackingStream();
+        context.Response.Body = destination;
+        var sink = new CollectingSink();
+        var provider = new Sha256ResponseFingerprintProvider();
+        var expected = Enumerable.Range(0, 9).Select(i => (byte)i).ToArray();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                var chunk = expected.AsMemory(i * 3, 3);
+                if (writeApi == 0)
+                {
+                    ctx.Response.Body.Write(chunk.Span);
+                    ctx.Response.Body.Flush();
+                }
+                else if (writeApi == 1)
+                {
+                    await ctx.Response.Body.WriteAsync(chunk);
+                    await ctx.Response.Body.FlushAsync();
+                }
+                else
+                {
+                    await ctx.Response.BodyWriter.WriteAsync(chunk);
+                }
+                Assert.Equal(expected.Take((i + 1) * 3).ToArray(), destination.ToArray());
+                Assert.Equal((i + 1) * 3L, destination.FlushedLengths.Last());
+                Assert.Empty(sink.Analyses);
+            }
+        });
+
+        await InvokeAsync(middleware, context,
+            limit < expected.Length ? new ThrowingFingerprintProvider() : provider,
+            options: new CacheAnalysisOptions { MaximumPayloadBytes = limit, MaximumFingerprintDuration = TimeSpan.FromSeconds(10) },
+            sinks: [sink]);
+
+        Assert.Same(destination, context.Response.Body);
+        Assert.Equal(expected, destination.ToArray()); // No final replay or duplication.
+        var analysis = Assert.Single(sink.Analyses);
+        Assert.Equal(9, analysis.PayloadBytes);
+        Assert.Equal(limit < expected.Length ? CacheRecommendation.PayloadTooLarge : CacheRecommendation.FirstObservation,
+            analysis.Recommendation);
+        Assert.Equal(limit < expected.Length ? null : provider.CreateFingerprint(expected), analysis.Fingerprint);
+    }
+
+    private sealed class FlushTrackingStream : MemoryStream
+    {
+        public List<long> FlushedLengths { get; } = [];
+        public override void Flush() => FlushedLengths.Add(Length);
+        public override Task FlushAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Flush();
+            return Task.CompletedTask;
+        }
     }
 
     [Fact]

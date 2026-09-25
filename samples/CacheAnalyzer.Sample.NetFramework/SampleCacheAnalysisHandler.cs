@@ -77,14 +77,19 @@ namespace CacheAnalyzer.Sample.NetFramework
                 watch.Stop();
                 if (watch.Elapsed > options.MaximumFingerprintDuration)
                 {
-                    if (slowFingerprints.Record(key, getPathKey, options))
+                    var slowResult = slowFingerprints.Record(key, getPathKey, options);
+                    if (slowResult == SlowFingerprintRecordResult.CapacityExceeded)
                     {
                         if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
                         {
                             ClearAnalysis();
-                            Console.WriteLine("Cache analysis stopped after exceeding {0} distinct slow fingerprint requests. Fingerprint analysis is too expensive under current conditions; this does not determine whether caching would be beneficial. Retained state cleared; subsequent requests bypass analysis.", options.MaximumSlowFingerprintRequests);
+                            Console.WriteLine("Cache analysis stopped after exceeding {0} slow request groups (GET paths or exact QUERY requests). Retained state cleared; subsequent requests bypass analysis for this pipeline's lifetime.", options.MaximumSlowFingerprintRequests);
                         }
                         return response;
+                    }
+                    if (slowResult == SlowFingerprintRecordResult.PathExcluded)
+                    {
+                        Console.WriteLine("Cache analysis excluded {0} after exceeding {1} distinct slow fingerprint query variants. Other paths continue analysis.", getPathKey, options.MaximumSlowFingerprintRequestsPerPath);
                     }
                     Console.WriteLine("{0}: {1}, {2} bytes", key, CacheRecommendation.FingerprintTooSlow, bytes.Length);
                     return response;

@@ -74,7 +74,6 @@ public sealed class CacheAnalyzerMiddleware
 
             if (IsAnalysisStopped() || !CanAnalyzeResponse(context.Response))
             {
-                await bufferedBody.CopyBufferedToAsync(context.RequestAborted);
                 return;
             }
 
@@ -99,17 +98,23 @@ public sealed class CacheAnalyzerMiddleware
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
             {
-                if (_slowFingerprints.Record(requestKey, getPathKey, options))
+                var slowResult = _slowFingerprints.Record(requestKey, getPathKey, options);
+                if (slowResult == SlowFingerprintRecordResult.CapacityExceeded)
                 {
                     if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
                     {
                         ClearAnalysis(history);
                         logger.LogInformation(
-                            "Cache analysis stopped after exceeding the limit of {MaximumSlowFingerprintRequests} distinct requests with slow fingerprint generation. Fingerprint analysis is too expensive for this API under current conditions; this does not determine whether caching would be beneficial. Retained state was cleared and subsequent requests bypass analysis.",
+                            "Cache analysis stopped after exceeding {MaximumSlowFingerprintRequests} slow request groups (GET paths or exact QUERY requests). Retained state was cleared and subsequent requests bypass analysis for this pipeline's lifetime.",
                             options.MaximumSlowFingerprintRequests);
                     }
-                    await originalBody.WriteAsync(responseBytes, context.RequestAborted);
                     return;
+                }
+                if (slowResult == SlowFingerprintRecordResult.PathExcluded)
+                {
+                    logger.LogInformation(
+                        "Cache analysis excluded {Path} after exceeding {MaximumSlowFingerprintRequestsPerPath} distinct slow fingerprint query variants. Other paths continue analysis.",
+                        getPathKey, options.MaximumSlowFingerprintRequestsPerPath);
                 }
                 Report(
                     sinks,
@@ -120,7 +125,6 @@ public sealed class CacheAnalyzerMiddleware
                         responseBytes.LongLength,
                         stopwatch.Elapsed,
                         fingerprint));
-                await originalBody.WriteAsync(responseBytes, context.RequestAborted);
                 return;
             }
 
@@ -143,8 +147,6 @@ public sealed class CacheAnalyzerMiddleware
                     fingerprint));
 
             StopAtCapacity(history, options, logger);
-
-            await originalBody.WriteAsync(responseBytes, context.RequestAborted);
         }
         finally
         {
