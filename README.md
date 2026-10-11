@@ -36,7 +36,8 @@ builder.Services.AddCacheAnalyzer(options =>
     options.MaximumFingerprintDuration = TimeSpan.FromMilliseconds(25);
     options.MaximumSlowFingerprintRequestsPerPath = 500;
     options.MaximumSlowFingerprintRequests = 500;
-    options.MaximumDistinctRequestKeys = 350;
+    options.MaximumDistinctRequests = 350;
+    options.MaximumCacheCandidates = 200;
     options.MaximumObservationsPerKey = 1_000;
     options.MinimumObservationsPerKey = 10;
     options.ObservationWindow = TimeSpan.FromHours(1);
@@ -69,6 +70,7 @@ HEAD and other methods bypass analysis. QUERY analysis keys include a SHA-256 ha
 {
   "CacheAnalyzer": {
     "Enabled": true,
+    "MaximumCacheCandidates": 200,
     "EndpointSelection": "AttributedEndpoints"
   }
 }
@@ -92,6 +94,16 @@ control.Enable();
 
 Analysis runs independently of client conditional headers. The API retains ownership of its status, headers, and complete body, including any existing ETag or 304 behavior. A response becomes a cache candidate when enough retained observations match and the payload is sufficiently larger than its internal fingerprint. Oversized payloads and slow fingerprint generation are reported without affecting the response.
 
+Once a request key qualifies as `CacheCandidate`, its first finding is retained separately and reported once. Later matching requests bypass response capture, fingerprinting, and history evaluation. GET query variants and QUERY body/content-metadata variants remain separate keys; identifying a QUERY key still requires request-body buffering and hashing. Candidate findings contain analysis metadata and a fingerprint, not response bodies. Inspect a point-in-time snapshot through the registered singleton:
+
+```csharp
+var candidates = app.Services.GetRequiredService<CacheCandidateStore>().GetSnapshot();
+```
+
+`MaximumCacheCandidates` defaults to 200 and can be set in app configuration as above. Analysis stops permanently for that middleware instance after the limit is exceeded: sequentially, the 201st distinct candidate is retained and reported, then observation history and slow exclusions are cleared. Candidate findings remain available even when another analysis capacity limit stops the run. Later requests bypass analysis; increasing the limit or toggling runtime enablement does not restart a stopped run. Admission and shutdown are best effort under concurrency: requests already in progress may finish analysis, and simultaneous candidate admissions can temporarily exceed the configured limit. No application-level locks serialize requests.
+
+Candidates are historical findings from this run, not continuously revalidated classifications. Later response changes for excluded keys will not be detected. Rerun analysis after relevant data or application changes, or after changing evaluation settings, by recreating the pipeline with fresh analysis services (normally restarting the application). The candidate store is in-memory and is not preserved across restarts.
+
 The ASP.NET Core adapter forwards every response write to the original stream and retains a separate copy up to `MaximumPayloadBytes` for analysis. It checks the declared Content-Length (when available) and accumulated size when capturing each write. If either exceeds the limit, it discards the analysis copy and skips fingerprinting; response forwarding continues without replaying bytes. It does not change headers, status, or payload. Responses exactly at the limit remain eligible. Capture capacity is capped at the configured limit (and the runtime array limit); eligible responses still allocate a second byte-array copy for fingerprinting. This is a per-response bound, not a total memory or concurrent-request limit, and does not limit QUERY request buffering. Copying, allocations, hashing, and stream adaptation add overhead and can affect timing. Hashing and reporting run after the downstream pipeline returns and can delay request completion. The .NET Framework sample adapter still checks payload size after buffering.
 
 ### Supported endpoint scope
@@ -112,7 +124,7 @@ Within each GET group, `MaximumSlowFingerprintRequestsPerPath` limits retained d
 
 The duration check measures elapsed time after fingerprint generation finishes; it cannot interrupt hashing already underway. CPU contention, thread scheduling, GC pauses, first-call initialization/JIT, and custom provider work can contribute to the measured duration even below the payload-size limit. The built-in provider measures hashing plus its setup and fingerprint-string conversion, not endpoint execution or response buffering. Slow fingerprint analysis does not establish that the API would be a poor caching candidate.
 
-The middleware defaults to a limit of 350 distinct request keys (`MaximumDistinctRequestKeys`, formerly `MaximumTrackedRequests`), with history retaining up to 1,000 observations per key (`MaximumObservationsPerKey`). `MinimumObservationsPerKey` defaults to 10 and controls the evidence needed for a recommendation; keep it at or below the observation maximum. The middleware checks `GetCountDistinctRequests()` at request entry and after recording an observation. After the endpoint returns, it checks only the shutdown flag. Requests already hashing may finish recording and reporting during shutdown; final cleanup releases late observations. Once the limit is detected, it logs one Information message, clears history, and permanently bypasses analysis for that middleware instance. Later requests go directly to the next handler without analyzer buffering, hashing, observations, or reports. Runtime enablement or increasing the limit does not reset this stop; recreate the pipeline (normally by restarting the application) to analyze again. The middleware remains registered in the built pipeline.
+The middleware defaults to a limit of 350 distinct request keys (`MaximumDistinctRequests`, formerly `MaximumTrackedRequests`), with history retaining up to 1,000 observations per key (`MaximumObservationsPerKey`). `MinimumObservationsPerKey` defaults to 10 and controls the evidence needed for a recommendation; keep it at or below the observation maximum. The middleware checks `GetCountDistinctRequests()` at request entry and after recording an observation. After the endpoint returns, it checks only the shutdown flag. Requests already hashing may finish recording and reporting during shutdown; final cleanup releases late observations. Once the limit is detected, it logs one Information message, clears history, and permanently bypasses analysis for that middleware instance. Later requests go directly to the next handler without analyzer buffering, hashing, observations, or reports. Runtime enablement or increasing the limit does not reset this stop; recreate the pipeline (normally by restarting the application) to analyze again. The middleware remains registered in the built pipeline.
 
 Capacity checks are best effort: concurrent requests can temporarily exceed the limit, and work or reports already in flight may finish. Retained history is cleared again as those requests finish, allowing its memory to be reclaimed by GC; this does not force immediate process-memory reduction or clear data retained by custom sinks. `IResponseFingerprintHistory` exposes `GetCountDistinctRequests()` and `Clear()`; custom implementations must implement these methods, and direct callers must enforce their own distinct-key capacity policy. The .NET Framework sample handler applies the same stop-and-bypass policy.
 

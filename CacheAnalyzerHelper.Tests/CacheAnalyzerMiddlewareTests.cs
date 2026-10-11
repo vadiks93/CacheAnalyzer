@@ -166,7 +166,7 @@ public sealed class CacheAnalyzerMiddlewareTests
     public async Task CapacityReached_LogsOnceClearsHistoryAndPermanentlyBypasses()
     {
         var history = new InMemoryResponseFingerprintHistory();
-        var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = 1 };
+        var options = new CacheAnalysisOptions { MaximumDistinctRequests = 1 };
         var logger = new CollectingLogger();
         var sink = new CollectingSink();
         var bypassExpected = false;
@@ -182,7 +182,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Single(sink.Analyses);
 
         bypassExpected = true;
-        options.MaximumDistinctRequestKeys = 100;
+        options.MaximumDistinctRequests = 100;
         for (var i = 0; i < 100; i++)
         {
             var context = CreateContext();
@@ -205,7 +205,7 @@ public sealed class CacheAnalyzerMiddlewareTests
     public async Task FullHistory_BypassesBeforeBufferingOrObservation(int limit)
     {
         var history = new InMemoryResponseFingerprintHistory();
-        var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = limit };
+        var options = new CacheAnalysisOptions { MaximumDistinctRequests = limit };
         if (limit > 0) history.Observe("existing", "A", 100, DateTimeOffset.UtcNow, options);
         var context = CreateContext();
         var originalBody = context.Response.Body;
@@ -230,7 +230,7 @@ public sealed class CacheAnalyzerMiddlewareTests
     public async Task ConcurrentCapacityShutdown_InFlightRequestsDoNotRepopulateHistory()
     {
         var history = new InMemoryResponseFingerprintHistory();
-        var options = new CacheAnalysisOptions { MaximumDistinctRequestKeys = 1 };
+        var options = new CacheAnalysisOptions { MaximumDistinctRequests = 1 };
         var logger = new CollectingLogger();
         var sink = new CollectingSink();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -734,6 +734,89 @@ public sealed class CacheAnalyzerMiddlewareTests
             sinks: [sink]);
         Assert.Equal(CacheRecommendation.FirstObservation, Assert.Single(sink.Analyses).Recommendation);
         Assert.Equal(ResponseJson, ReadBody(context));
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("QUERY")]
+    public async Task Candidate_BypassesLaterMatchingRequests_ButAnalyzesOtherKeys(string method)
+    {
+        var candidates = new CacheCandidateStore();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            if (ctx.Items.ContainsKey("expectBypass"))
+                Assert.Same(ctx.Items["originalBody"], ctx.Response.Body);
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(ResponseJson);
+        }, candidates);
+        var history = new InMemoryResponseFingerprintHistory();
+        var options = new CacheAnalysisOptions
+        {
+            MinimumObservationsPerKey = 2, MinimumPayloadToFingerprintRatio = 0,
+            MaximumFingerprintDuration = TimeSpan.FromSeconds(10)
+        };
+        var sink = new CollectingSink();
+        for (var i = 0; i < 2; i++)
+        {
+            var context = CreateContext();
+            context.Request.Method = method;
+            await InvokeAsync(middleware, context, history: history, options: options, sinks: [sink]);
+        }
+        Assert.Equal(CacheRecommendation.CacheCandidate, sink.Analyses.Last().Recommendation);
+        Assert.Single(candidates.GetSnapshot());
+        var repeat = CreateContext();
+        repeat.Request.Method = method;
+        repeat.Items["expectBypass"] = true;
+        repeat.Items["originalBody"] = repeat.Response.Body;
+        await InvokeAsync(middleware, repeat, new ThrowingFingerprintProvider(), history, options, [sink]);
+        Assert.Equal(ResponseJson, ReadBody(repeat));
+        Assert.Equal(2, sink.Analyses.Count);
+        var other = CreateContext();
+        other.Request.Method = method;
+        if (method == "GET") other.Request.QueryString = new QueryString("?id=2");
+        else other.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes("different query"));
+        await InvokeAsync(middleware, other, history: history, options: options, sinks: [sink]);
+        Assert.Equal(CacheRecommendation.FirstObservation, sink.Analyses.Last().Recommendation);
+        Assert.Equal(3, sink.Analyses.Count);
+    }
+
+    [Fact]
+    public async Task CandidateLimit_StopsOnlyWhenExceeded_PreservesFindingsAndBypassesAllLaterRequests()
+    {
+        var candidates = new CacheCandidateStore();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(ResponseJson);
+        }, candidates);
+        var history = new InMemoryResponseFingerprintHistory();
+        var logger = new CollectingLogger();
+        var options = new CacheAnalysisOptions
+        {
+            MaximumCacheCandidates = 1, MinimumObservationsPerKey = 2,
+            MinimumPayloadToFingerprintRatio = 0, MaximumFingerprintDuration = TimeSpan.FromSeconds(10)
+        };
+        var sink = new CollectingSink();
+        foreach (var path in new[] { "/one", "/two" })
+        {
+            for (var i = 0; i < 2; i++)
+            {
+                var context = CreateContext();
+                context.Request.Path = path;
+                await InvokeAsync(middleware, context, history: history, options: options, sinks: [sink], logger: logger);
+            }
+        }
+        Assert.Equal(2, candidates.Count);
+        Assert.Equal(4, sink.Analyses.Count);
+        Assert.Equal(0, history.GetCountDistinctRequests());
+        Assert.Single(logger.Messages, message => message.Contains("cache candidates"));
+        options.MaximumCacheCandidates = 100;
+        var later = CreateContext();
+        later.Request.Path = "/three";
+        await InvokeAsync(middleware, later, new ThrowingFingerprintProvider(), history, options, [sink], logger: logger);
+        Assert.Equal(ResponseJson, ReadBody(later));
+        Assert.Equal(4, sink.Analyses.Count);
+        Assert.Equal(2, candidates.GetSnapshot().Length);
     }
 
     private static DefaultHttpContext CreateContext(string? etag = null, bool tagged = true)

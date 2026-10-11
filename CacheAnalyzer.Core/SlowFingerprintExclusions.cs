@@ -19,7 +19,7 @@ public sealed class SlowFingerprintExclusions
     /// Records a distinct slow request, reporting path exclusion or overall capacity overflow.
     /// Previously excluded requests do not count again. Concurrent admission can overshoot.
     /// </summary>
-    public SlowFingerprintRecordResult Record(string requestKey, string? getPathKey, CacheAnalysisOptions options)
+    public SlowFingerprintRecordResult RecordSlowRequest(string requestKey, string? getPathKey, CacheAnalysisOptions options)
     {
         var state = Volatile.Read(ref _state);
         var groupKey = getPathKey ?? requestKey;

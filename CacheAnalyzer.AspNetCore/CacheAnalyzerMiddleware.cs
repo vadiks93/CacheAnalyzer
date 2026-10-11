@@ -11,14 +11,16 @@ namespace CacheAnalyzer.AspNetCore;
 public sealed class CacheAnalyzerMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly CacheCandidateStore _candidates;
     private readonly SlowFingerprintExclusions _slowFingerprints = new();
     // Volatile reads provide cross-thread visibility of shutdown without locking.
     // In-flight analysis remains best effort; the atomic transition selects one logger.
     private int _analysisStopped;
 
-    public CacheAnalyzerMiddleware(RequestDelegate next)
+    public CacheAnalyzerMiddleware(RequestDelegate next, CacheCandidateStore? candidates = null)
     {
         _next = next;
+        _candidates = candidates ?? new CacheCandidateStore();
     }
 
     public async Task InvokeAsync(
@@ -30,7 +32,7 @@ public sealed class CacheAnalyzerMiddleware
         IEnumerable<IResponseAnalysisSink> sinks,
         ILogger<CacheAnalyzerMiddleware> logger)
     {
-        #region negative scenarios where analysis is stopped or cannot be analysed
+        #region before response - negative scenarios where analysis is stopped or cannot be analysed
         if (IsAnalysisStopped())
         {
             await _next(context);
@@ -44,7 +46,7 @@ public sealed class CacheAnalyzerMiddleware
             return;
         }
 
-        if (StopAtCapacity(history, options, logger))
+        if (StopAtCandidateCapacity(history, options, logger) || StopAtCapacity(history, options, logger))
         {
             await _next(context);
             return;
@@ -52,6 +54,11 @@ public sealed class CacheAnalyzerMiddleware
 
 
         var requestKey = await CreateRequestKeyAsync(context.Request);
+        if (_candidates.Contains(requestKey))
+        {
+            await _next(context);
+            return;
+        }
         // Group only GET query variants; QUERY request bodies retain their own identity.
         var getPathKey = HttpMethods.IsGet(context.Request.Method)
             ? $"GET {context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{context.Request.Path}"
@@ -72,6 +79,7 @@ public sealed class CacheAnalyzerMiddleware
         {
             await _next(context);
 
+            #region after response payload - negative scenario
             if (IsAnalysisStopped() || !CanAnalyzeResponse(context.Response))
             {
                 return;
@@ -98,7 +106,7 @@ public sealed class CacheAnalyzerMiddleware
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
             {
-                var slowResult = _slowFingerprints.Record(requestKey, getPathKey, options);
+                var slowResult = _slowFingerprints.RecordSlowRequest(requestKey, getPathKey, options);
                 if (slowResult == SlowFingerprintRecordResult.CapacityExceeded)
                 {
                     if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
@@ -127,6 +135,7 @@ public sealed class CacheAnalyzerMiddleware
                         fingerprint));
                 return;
             }
+            #endregion
 
             // Once hashing has started, let this request finish analysis and reporting.
             // Shutdown may overlap; the finally block releases any late observations.
@@ -136,17 +145,22 @@ public sealed class CacheAnalyzerMiddleware
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
                 options);
-            Report(
-                sinks,
-                logger,
-                new ResponseAnalysis(
+            var analysis = new ResponseAnalysis(
                     requestKey,
                     historyResult.Recommendation,
                     responseBytes.LongLength,
                     stopwatch.Elapsed,
-                    fingerprint));
+                    fingerprint);
+            // Other requests may already be analyzing this key. Preserve and report
+            // only its first candidate finding; no requests wait for one another.
+            if (analysis.Recommendation != CacheRecommendation.CacheCandidate ||
+                (!IsAnalysisStopped() && _candidates.TryAdd(analysis)))
+            {
+                Report(sinks, logger, analysis);
+            }
 
-            StopAtCapacity(history, options, logger);
+            if (!StopAtCandidateCapacity(history, options, logger))
+                StopAtCapacity(history, options, logger);
         }
         finally
         {
@@ -156,21 +170,34 @@ public sealed class CacheAnalyzerMiddleware
         }
     }
 
+    private bool StopAtCandidateCapacity(
+        IResponseFingerprintHistory history, CacheAnalysisOptions options, ILogger logger)
+    {
+        if (_candidates.Count <= options.MaximumCacheCandidates) return false;
+        if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
+        {
+            ClearAnalysis(history);
+            logger.LogInformation(
+                "Cache analysis stopped after exceeding {MaximumCacheCandidates} cache candidates. Candidate findings were preserved; subsequent requests bypass analysis for this pipeline's lifetime. Rerun analysis after relevant data or application changes.",
+                options.MaximumCacheCandidates);
+        }
+        return true;
+    }
+
     private bool StopAtCapacity(
         IResponseFingerprintHistory history,
         CacheAnalysisOptions options,
         ILogger logger)
     {
-        if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
+        if (history.GetCountDistinctRequests() < options.MaximumDistinctRequests) return false;
 
         if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
         {
             ClearAnalysis(history);
             logger.LogInformation(
-                "Cache analysis stopped after reaching the distinct request key limit of {MaximumDistinctRequestKeys}. Retained history was cleared; subsequent requests bypass analysis for this pipeline's lifetime.",
-                options.MaximumDistinctRequestKeys);
+                "Cache analysis stopped after reaching the distinct request limit of {MaximumDistinctRequests}. Retained history was cleared; subsequent requests bypass analysis for this pipeline's lifetime.",
+                options.MaximumDistinctRequests);
         }
-
         return true;
     }
 

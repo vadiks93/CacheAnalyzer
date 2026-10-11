@@ -4,6 +4,12 @@ public sealed class CacheAnalysisOptions
 {
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// Stop analysis after exceeding this number of distinct cache candidates (default 200).
+    /// Findings are preserved; capacity accounting is best effort under concurrency.
+    /// </summary>
+    public int MaximumCacheCandidates { get; set; } = 200;
+
     public EndpointSelectionMode EndpointSelection { get; set; } = EndpointSelectionMode.AttributedEndpoints;
 
     /// <summary>
@@ -30,14 +36,14 @@ public sealed class CacheAnalysisOptions
     public int MaximumSlowFingerprintRequests { get; set; } = 500;
 
     /// <summary>
-    /// Gets or sets the maximum number of distinct request keys retained in memory.
+    /// Gets or sets the maximum number of distinct requests retained in memory.
     /// Defaults to 350. The middleware checks this limit outside history and permanently
     /// bypasses analysis once reached, logs once, and clears retained history.
     /// This does not limit incoming requests. Direct history callers enforce their own policy.
     /// Capacity checks are best effort: concurrent observations can exceed the limit;
     /// in-flight requests release remaining history when they finish.
     /// </summary>
-    public int MaximumDistinctRequestKeys { get; set; } = 350;
+    public int MaximumDistinctRequests { get; set; } = 350;
 
     /// <summary>
     /// Gets or sets the maximum number of observations retained for each request key.

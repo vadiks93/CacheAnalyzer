@@ -18,12 +18,12 @@ public sealed class SlowFingerprintExclusionsTests
         var exclusions = new SlowFingerprintExclusions();
         var options = new CacheAnalysisOptions { MaximumSlowFingerprintRequestsPerPath = 1 };
         const string path = "GET https://example.test/products";
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record(path + "?id=1", path, options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest(path + "?id=1", path, options));
         for (var i = 0; i < 100; i++)
-            Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record(path + "?id=1", path, options));
+            Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest(path + "?id=1", path, options));
         Assert.True(exclusions.IsExcluded(path + "?id=1", path, options));
         Assert.False(exclusions.IsExcluded(path + "?id=2", path, options));
-        Assert.Equal(SlowFingerprintRecordResult.PathExcluded, exclusions.Record(path + "?id=2", path, options));
+        Assert.Equal(SlowFingerprintRecordResult.PathExcluded, exclusions.RecordSlowRequest(path + "?id=2", path, options));
         Assert.True(exclusions.IsExcluded(path + "?id=3", path, options));
         Assert.False(exclusions.IsExcluded("GET https://other.test/products?id=3", "GET https://other.test/products", options));
         Assert.False(exclusions.IsExcluded(path + "/123", path + "/123", options));
@@ -38,18 +38,18 @@ public sealed class SlowFingerprintExclusionsTests
             MaximumSlowFingerprintRequests = 2,
             MaximumSlowFingerprintRequestsPerPath = 1
         };
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("a?1", "path-a", options));
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("b", "path-b", options));
-        Assert.Equal(SlowFingerprintRecordResult.PathExcluded, exclusions.Record("a?2", "path-a", options));
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("a?3", "path-a", options));
-        Assert.Equal(SlowFingerprintRecordResult.CapacityExceeded, exclusions.Record("c", "path-c", options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("a?1", "path-a", options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("b", "path-b", options));
+        Assert.Equal(SlowFingerprintRecordResult.PathExcluded, exclusions.RecordSlowRequest("a?2", "path-a", options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("a?3", "path-a", options));
+        Assert.Equal(SlowFingerprintRecordResult.CapacityExceeded, exclusions.RecordSlowRequest("c", "path-c", options));
         Assert.True(exclusions.IsExcluded("a?new", "path-a", options));
         Assert.True(exclusions.IsExcluded("b", "path-b", options));
         Assert.False(exclusions.IsExcluded("c", "path-c", options));
         exclusions.Clear();
         Assert.False(exclusions.IsExcluded("a?new", "path-a", options));
         Assert.False(exclusions.IsExcluded("b", "path-b", options));
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("c", "path-c", options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("c", "path-c", options));
     }
 
     [Fact]
@@ -57,8 +57,8 @@ public sealed class SlowFingerprintExclusionsTests
     {
         var exclusions = new SlowFingerprintExclusions();
         var options = new CacheAnalysisOptions { MaximumSlowFingerprintRequests = 10 };
-        Parallel.For(0, 100, i => exclusions.Record("request-" + i, "path-" + i, options));
-        Assert.Equal(SlowFingerprintRecordResult.CapacityExceeded, exclusions.Record("new", "new-path", options));
+        Parallel.For(0, 100, i => exclusions.RecordSlowRequest("request-" + i, "path-" + i, options));
+        Assert.Equal(SlowFingerprintRecordResult.CapacityExceeded, exclusions.RecordSlowRequest("new", "new-path", options));
         exclusions.Clear();
         for (var i = 0; i < 100; i++)
             Assert.False(exclusions.IsExcluded("request-" + i, "path-" + i, options));
@@ -69,9 +69,9 @@ public sealed class SlowFingerprintExclusionsTests
     {
         var exclusions = new SlowFingerprintExclusions();
         var options = new CacheAnalysisOptions { MaximumSlowFingerprintRequests = 1 };
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("QUERY /products body-A", null, options));
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("QUERY /products body-A", null, options));
-        Assert.Equal(SlowFingerprintRecordResult.CapacityExceeded, exclusions.Record("QUERY /products body-B", null, options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("QUERY /products body-A", null, options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("QUERY /products body-A", null, options));
+        Assert.Equal(SlowFingerprintRecordResult.CapacityExceeded, exclusions.RecordSlowRequest("QUERY /products body-B", null, options));
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public sealed class SlowFingerprintExclusionsTests
     {
         var exclusions = new SlowFingerprintExclusions();
         var options = new CacheAnalysisOptions { MaximumSlowFingerprintRequestsPerPath = 1 };
-        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.Record("QUERY /products body-A", null, options));
+        Assert.Equal(SlowFingerprintRecordResult.Recorded, exclusions.RecordSlowRequest("QUERY /products body-A", null, options));
         Assert.True(exclusions.IsExcluded("QUERY /products body-A", null, options));
         Assert.False(exclusions.IsExcluded("QUERY /products body-B", null, options));
     }
@@ -89,7 +89,7 @@ public sealed class SlowFingerprintExclusionsTests
     {
         var exclusions = new SlowFingerprintExclusions();
         var options = new CacheAnalysisOptions { MaximumSlowFingerprintRequestsPerPath = 10 };
-        Parallel.For(0, 100, i => exclusions.Record("path?id=" + i, "path", options));
+        Parallel.For(0, 100, i => exclusions.RecordSlowRequest("path?id=" + i, "path", options));
         Assert.True(exclusions.IsExcluded("path?id=new", "path", options));
         Assert.False(exclusions.IsExcluded("other?id=new", "other", options));
         exclusions.Clear();

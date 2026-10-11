@@ -18,6 +18,7 @@ namespace CacheAnalyzer.Sample.NetFramework
         private readonly IResponseFingerprintProvider fingerprints = new Sha256ResponseFingerprintProvider();
         private readonly IResponseFingerprintHistory history = new InMemoryResponseFingerprintHistory();
         private readonly SlowFingerprintExclusions slowFingerprints = new SlowFingerprintExclusions();
+        public CacheCandidateStore Candidates { get; } = new CacheCandidateStore();
         // Volatile reads provide cross-thread visibility of shutdown without locking.
         // In-flight analysis remains best effort; the atomic transition selects one logger.
         private int analysisStopped;
@@ -25,7 +26,7 @@ namespace CacheAnalyzer.Sample.NetFramework
         {
             MinimumObservationsPerKey = 3,
             MinimumPayloadToFingerprintRatio = 10,
-            MaximumDistinctRequestKeys = 200,
+            MaximumDistinctRequests = 200,
             MaximumObservationsPerKey = 1_000
         };
 
@@ -39,7 +40,7 @@ namespace CacheAnalyzer.Sample.NetFramework
                 !request.RequestUri.AbsolutePath.StartsWith("/api/", StringComparison.Ordinal))
                 return await base.SendAsync(request, cancellationToken);
 
-            if (StopAtCapacity()) return await base.SendAsync(request, cancellationToken);
+            if (StopAtCandidateCapacity() || StopAtCapacity()) return await base.SendAsync(request, cancellationToken);
 
             try
             {
@@ -58,7 +59,7 @@ namespace CacheAnalyzer.Sample.NetFramework
                 }
 
                 var getPathKey = isQuery ? null : "GET " + request.RequestUri.GetLeftPart(UriPartial.Path);
-                if (slowFingerprints.IsExcluded(key, getPathKey, options))
+                if (Candidates.Contains(key) || slowFingerprints.IsExcluded(key, getPathKey, options))
                     return await base.SendAsync(request, cancellationToken);
 
                 var response = await base.SendAsync(request, cancellationToken);
@@ -77,7 +78,7 @@ namespace CacheAnalyzer.Sample.NetFramework
                 watch.Stop();
                 if (watch.Elapsed > options.MaximumFingerprintDuration)
                 {
-                    var slowResult = slowFingerprints.Record(key, getPathKey, options);
+                    var slowResult = slowFingerprints.RecordSlowRequest(key, getPathKey, options);
                     if (slowResult == SlowFingerprintRecordResult.CapacityExceeded)
                     {
                         if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
@@ -97,8 +98,11 @@ namespace CacheAnalyzer.Sample.NetFramework
 
                 // Hashing already started; allow late observations and clean up in finally.
                 var observation = history.Observe(key, fingerprint, bytes.LongLength, DateTimeOffset.UtcNow, options);
-                Console.WriteLine("{0}: {1}, {2} bytes", key, observation.Recommendation, bytes.Length);
-                StopAtCapacity();
+                var analysis = new ResponseAnalysis(key, observation.Recommendation, bytes.LongLength, watch.Elapsed, fingerprint);
+                if (observation.Recommendation != CacheRecommendation.CacheCandidate ||
+                    (Volatile.Read(ref analysisStopped) == 0 && Candidates.TryAdd(analysis)))
+                    Console.WriteLine("{0}: {1}, {2} bytes", key, observation.Recommendation, bytes.Length);
+                if (!StopAtCandidateCapacity()) StopAtCapacity();
                 return response;
             }
             finally
@@ -107,13 +111,24 @@ namespace CacheAnalyzer.Sample.NetFramework
             }
         }
 
-        private bool StopAtCapacity()
+        private bool StopAtCandidateCapacity()
         {
-            if (history.GetCountDistinctRequests() < options.MaximumDistinctRequestKeys) return false;
+            if (Candidates.Count <= options.MaximumCacheCandidates) return false;
             if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
             {
                 ClearAnalysis();
-                Console.WriteLine("Cache analysis stopped at the distinct request key limit of {0}. History cleared; subsequent requests bypass analysis.", options.MaximumDistinctRequestKeys);
+                Console.WriteLine("Cache analysis stopped after exceeding {0} cache candidates. Findings preserved; rerun analysis after relevant data or application changes.", options.MaximumCacheCandidates);
+            }
+            return true;
+        }
+
+        private bool StopAtCapacity()
+        {
+            if (history.GetCountDistinctRequests() < options.MaximumDistinctRequests) return false;
+            if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
+            {
+                ClearAnalysis();
+                Console.WriteLine("Cache analysis stopped at the distinct request key limit of {0}. History cleared; subsequent requests bypass analysis.", options.MaximumDistinctRequests);
             }
             return true;
         }

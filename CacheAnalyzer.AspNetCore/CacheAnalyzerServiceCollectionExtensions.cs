@@ -19,6 +19,7 @@ public static class CacheAnalyzerServiceCollectionExtensions
         }
 
         services.TryAddSingleton<ICacheAnalyzerRuntimeControl, CacheAnalyzerRuntimeControl>();
+        services.TryAddSingleton<CacheCandidateStore>();
         services.TryAddSingleton<IResponseFingerprintProvider, Sha256ResponseFingerprintProvider>();
         services.TryAddSingleton<IResponseFingerprintHistory, InMemoryResponseFingerprintHistory>();
         services.TryAddEnumerable(

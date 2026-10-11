@@ -7,3 +7,10 @@
 - This rule permits the built-in synchronization inside concurrent collections. Do not claim that their use makes the entire implementation formally lock-free or guarantees zero waiting.
 - Compare all eligible fingerprints in the snapshot with the current fingerprint; do not assume the current observation occupies the last position under concurrency.
 - Keep history retention bounded on a best-effort basis, document concurrency limitations, and test eventual/sequential behavior rather than requiring atomic consistency.
+
+# Session recaps
+
+- Maintain concise question/answer and work recaps by default in `ai/sessions/YYYY-MM-DD_HH-mm.md`, using Europe/Chisinau local time and a new file for each session (add a numeric suffix if needed). Update the current session's file after substantive answers or completed work, before ending the turn; do not rely on a session-close event.
+- Preserve earlier session files. Record key questions and answers, decisions, relevant source paths, completed changes and validation, and outstanding work. Summarize rather than transcribing the chat; do not include secrets or invent unavailable history.
+- At the first interaction of a new session, or when the user returns on a new day, read the most recent recaps and provide a brief reminder of the last discussion and any outstanding work, then address the current request. Read older files only when relevant. Revalidate implementation facts before relying on potentially stale notes.
+- This applies to Codex interactions in this repository. Do not claim that opening VS Code alone triggers a message or background work.
