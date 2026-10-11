@@ -3,6 +3,8 @@ using CacheAnalyzer.AspNetCore;
 using CacheAnalyzer.Core;
 using CacheAnalyzerHelper;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -387,7 +389,8 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(4, sink.Analyses.Count);
         Assert.Equal(CacheRecommendation.FirstObservation, sink.Analyses[3].Recommendation);
         Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
-        Assert.Contains("/slow", Assert.Single(logger.Messages));
+        Assert.DoesNotContain("/slow", Assert.Single(logger.Messages));
+        Assert.Contains("path ID", Assert.Single(logger.Messages));
     }
 
     [Fact]
@@ -655,7 +658,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(CacheRecommendation.FirstObservation, analysis.Recommendation);
         Assert.Equal(9, analysis.PayloadBytes);
         Assert.Equal(1, history.GetCountDistinctRequests());
-        Assert.Equal(provider.CreateFingerprint(original.ToArray()), analysis.Fingerprint);
+        Assert.Equal(provider.CreateFingerprint(original.ToArray()), analysis.FingerprintResponse);
     }
 
     [Theory]
@@ -709,7 +712,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(9, analysis.PayloadBytes);
         Assert.Equal(limit < expected.Length ? CacheRecommendation.PayloadTooLarge : CacheRecommendation.FirstObservation,
             analysis.Recommendation);
-        Assert.Equal(limit < expected.Length ? null : provider.CreateFingerprint(expected), analysis.Fingerprint);
+        Assert.Equal(limit < expected.Length ? null : provider.CreateFingerprint(expected), analysis.FingerprintResponse);
     }
 
     private sealed class FlushTrackingStream : MemoryStream
@@ -817,6 +820,99 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(ResponseJson, ReadBody(later));
         Assert.Equal(4, sink.Analyses.Count);
         Assert.Equal(2, candidates.GetSnapshot().Length);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    public async Task FingerprintLogging_GlobalOrEndpointOptIn_IsCarriedToAnalysis(
+        bool globalOptIn, bool endpointOptIn, bool expected)
+    {
+        var context = CreateContext();
+        context.SetEndpoint(new Endpoint(_ => Task.CompletedTask,
+            new EndpointMetadataCollection(new CacheAnalyzeAttribute { IncludeFingerprintInLogs = endpointOptIn }), "test"));
+        var sink = new CollectingSink();
+        await InvokeAsync(CreateMiddleware(), context, options: new CacheAnalysisOptions
+        {
+            IncludeFingerprintInLogs = globalOptIn,
+            MaximumFingerprintDuration = TimeSpan.FromSeconds(10)
+        }, sinks: [sink]);
+
+        var analysis = Assert.Single(sink.Analyses);
+        Assert.Equal(expected, analysis.IncludeFingerprintInLogs);
+        Assert.NotNull(analysis.FingerprintResponse); // Analysis still retains the fingerprint internally.
+        Assert.Equal(ResponseJson, ReadBody(context));
+    }
+
+    [Fact]
+    public async Task SlowFingerprint_EndpointOptIn_IsCarriedToAnalysis()
+    {
+        var context = CreateContext();
+        context.SetEndpoint(new Endpoint(_ => Task.CompletedTask,
+            new EndpointMetadataCollection(new CacheAnalyzeAttribute { IncludeFingerprintInLogs = true }), "test"));
+        var sink = new CollectingSink();
+        await InvokeAsync(CreateMiddleware(), context, new SlowFingerprintProvider(), options: new CacheAnalysisOptions
+        {
+            MaximumFingerprintDuration = TimeSpan.Zero
+        }, sinks: [sink]);
+        var analysis = Assert.Single(sink.Analyses);
+        Assert.Equal(CacheRecommendation.FingerprintTooSlow, analysis.Recommendation);
+        Assert.True(analysis.IncludeFingerprintInLogs);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    public async Task FullRequestDisclosure_DefaultsToHashedIdentity_WithRouteLabel(
+        bool globalOptIn, bool endpointOptIn, bool expected)
+    {
+        var context = CreateContext();
+        context.Request.Scheme = "https";
+        context.Request.Host = new HostString("private.example");
+        context.Request.Path = "/products/private-id";
+        context.Request.QueryString = new QueryString("?token=secret");
+        context.SetEndpoint(new RouteEndpoint(_ => Task.CompletedTask,
+            RoutePatternFactory.Parse("/products/{id}"), 0,
+            new EndpointMetadataCollection(new CacheAnalyzeAttribute { IncludeFullRequestKeyInLogs = endpointOptIn }), "test"));
+        var history = new RecordingHistory();
+        var candidates = new CacheCandidateStore();
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(ResponseJson);
+        }, candidates);
+        var sink = new CollectingSink();
+        await InvokeAsync(middleware, context, history: history, options: new CacheAnalysisOptions
+        {
+            IncludeFullRequestKeyInLogs = globalOptIn,
+            MaximumFingerprintDuration = TimeSpan.FromSeconds(10)
+        }, sinks: [sink]);
+        const string fullKey = "GET https://private.example/products/private-id?token=secret";
+        var analysis = Assert.Single(sink.Analyses);
+        Assert.Equal(RequestIdentity.Create(fullKey), analysis.FingerprintRequest);
+        Assert.Equal(analysis.FingerprintRequest, history.Key);
+        Assert.Equal("GET /products/{id}", analysis.Endpoint);
+        Assert.Equal(expected, analysis.IncludeFullRequestKeyInLogs);
+        Assert.Equal(expected ? fullKey : null, analysis.FullRequestKey);
+        Assert.Equal(analysis.FingerprintRequest, Assert.Single(candidates.GetSnapshot()).RequestKey);
+        Assert.Equal(ResponseJson, ReadBody(context));
+    }
+
+    private sealed class RecordingHistory : IResponseFingerprintHistory
+    {
+        public string? Key { get; private set; }
+        public int GetCountDistinctRequests() => 0;
+        public void Clear() { }
+        public FingerprintHistoryResult Observe(string requestKey, string fingerprint, long payloadBytes,
+            DateTimeOffset observedAt, CacheAnalysisOptions options)
+        {
+            Key = requestKey;
+            return new FingerprintHistoryResult(CacheRecommendation.CacheCandidate);
+        }
     }
 
     private static DefaultHttpContext CreateContext(string? etag = null, bool tagged = true)

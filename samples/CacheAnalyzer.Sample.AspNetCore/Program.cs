@@ -13,6 +13,7 @@ builder.Services.AddCacheAnalyzer(options =>
     options.MaximumDistinctRequests = 200;
     options.MaximumObservationsPerKey = 1_000;
 });
+builder.Services.Configure<CacheAnalysisOptions>(builder.Configuration.GetSection("CacheAnalyzer"));
 
 var app = builder.Build();
 app.UseRouting();

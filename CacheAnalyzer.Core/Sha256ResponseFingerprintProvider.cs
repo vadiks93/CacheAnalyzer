@@ -13,6 +13,9 @@ public sealed class Sha256ResponseFingerprintProvider : IResponseFingerprintProv
 
         using (var algorithm = SHA256.Create())
         {
+            // Compare complete response bytes without parsing or excluding fields.
+            // Volatile timestamps/IDs and randomized ciphertext therefore change the hash,
+            // even when the underlying business data is unchanged.
             var hash = algorithm.ComputeHash(responseBody);
             var value = Convert.ToBase64String(hash)
                 .TrimEnd('=')

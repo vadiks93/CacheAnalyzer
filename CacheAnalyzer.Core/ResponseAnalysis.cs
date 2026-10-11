@@ -7,18 +7,32 @@ public sealed class ResponseAnalysis
         CacheRecommendation recommendation,
         long payloadBytes,
         TimeSpan fingerprintDuration,
-        string? fingerprint,
-        bool trackingCapacityReached = false)
+        string? fingerprintResponse,
+        bool trackingCapacityReached = false,
+        bool includeFingerprintInLogs = false,
+        string? endpoint = null,
+        bool includeFullRequestKeyInLogs = false)
     {
-        RequestKey = requestKey;
+        FingerprintRequest = RequestIdentity.Create(requestKey);
+        Endpoint = endpoint ?? "(unmapped endpoint)";
+        FullRequestKey = includeFullRequestKeyInLogs ? requestKey : null;
         Recommendation = recommendation;
         PayloadBytes = payloadBytes;
         FingerprintDuration = fingerprintDuration;
-        Fingerprint = fingerprint;
+        FingerprintResponse = fingerprintResponse;
         TrackingCapacityReached = trackingCapacityReached;
+        IncludeFingerprintInLogs = includeFingerprintInLogs;
+        IncludeFullRequestKeyInLogs = includeFullRequestKeyInLogs;
     }
 
-    public string RequestKey { get; }
+    /// <summary>Opaque request identity. Use Endpoint for a readable label.</summary>
+    public string RequestKey => FingerprintRequest;
+
+    public string FingerprintRequest { get; }
+    public string Endpoint { get; }
+    /// <summary>Full request details retained only when explicitly opted in.</summary>
+    public string? FullRequestKey { get; }
+    public bool IncludeFullRequestKeyInLogs { get; }
 
     public CacheRecommendation Recommendation { get; }
 
@@ -26,7 +40,10 @@ public sealed class ResponseAnalysis
 
     public TimeSpan FingerprintDuration { get; }
 
-    public string? Fingerprint { get; }
+    public string? FingerprintResponse { get; }
 
     public bool TrackingCapacityReached { get; }
+
+    /// <summary>Whether the default logging sink may include the internal fingerprint.</summary>
+    public bool IncludeFingerprintInLogs { get; }
 }

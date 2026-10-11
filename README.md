@@ -104,11 +104,70 @@ var candidates = app.Services.GetRequiredService<CacheCandidateStore>().GetSnaps
 
 Candidates are historical findings from this run, not continuously revalidated classifications. Later response changes for excluded keys will not be detected. Rerun analysis after relevant data or application changes, or after changing evaluation settings, by recreating the pipeline with fresh analysis services (normally restarting the application). The candidate store is in-memory and is not preserved across restarts.
 
+The default logging sink includes a structured string property `Cacheable`, rendered as `cacheable=1` for `CacheCandidate`, `cacheable=0` for `ResponseChanged`, `PayloadTooLarge`, or `FingerprintTooSlow`, and `cacheable=unknown` for `FirstObservation` or `InsufficientTraffic`. This is an advisory analysis result under the configured limits, not an HTTP caching directive or proof that caching is impossible. Candidate, oversized, and slow-fingerprint events use Information; changed-response and pending-evidence events use Debug, so enable Debug for this sink to see those events. Excluded or bypassed requests do not produce new analysis events.
+
+Every analysis event exposes separate structured fields: `Endpoint`, `fingerprintRequest`, `Cacheable`, `Recommendation`, `PayloadBytes`, `FingerprintMilliseconds`, and `TrackingCapacityReached`. `Endpoint` is the method plus declared route template (for example `GET /api/products/{id}`), without actual route-parameter or query values. If route metadata is unavailable, it uses the method plus `(unmapped endpoint)` rather than exposing the actual path. `fingerprintRequest` is a SHA-256/Base64URL hash of the complete request key, preserving separate identities for different origins, literal paths, query strings, and QUERY bodies/content metadata. Recommendations are strings; byte counts and duration are numeric; the capacity flag is boolean. `fingerprintResponse` and `FullRequestKey` are omitted from both the message and structured state by default. The ASP.NET Core sample uses JSON console output, with these fields under `State` alongside the logger's timestamp, category, level, and message. To enable the same format in a consuming ASP.NET Core application's default console provider, add this configuration:
+
+```json
+{
+  "Logging": {
+    "Console": {
+      "FormatterName": "json",
+      "FormatterOptions": {
+        "TimestampFormat": "yyyy-MM-ddTHH:mm:ss.fffZ",
+        "UseUtcTimestamp": true,
+        "IncludeScopes": true
+      }
+    },
+    "LogLevel": {
+      "CacheAnalyzer.AspNetCore.LoggingResponseAnalysisSink": "Debug"
+    }
+  }
+}
+```
+
+Console events remain one JSON object per line for ingestion by systems such as Splunk. The library supplies structured properties through `ILogger`; the application controls provider/output formatting, so existing logging providers are not replaced. JSON is not serialized into an embedded message string.
+
+To explicitly include the internal response fingerprint in logs for all analyzed endpoints, set `options.IncludeFingerprintInLogs = true` in `AddCacheAnalyzer`, or set `"IncludeFingerprintInLogs": true` under the bound `CacheAnalyzer` configuration section. Alternatively, opt in for a single controller action:
+
+```csharp
+[HttpGet("{id:int}")]
+[CacheAnalyze(IncludeFingerprintInLogs = true)]
+public Product Get(int id) => repository.Get(id);
+```
+
+Minimal API endpoints can opt in through `.WithMetadata(new CacheAnalyzeAttribute { IncludeFingerprintInLogs = true })`. Either the global option or endpoint opt-in enables the field; an attribute's default `false` does not override a global opt-in. This affects the default logging sink only. Fingerprints remain available internally in analysis results, candidate snapshots, and custom sinks; custom sinks control their own disclosure. When enabled, `fingerprintResponse` is a separate nullable string field (null when no fingerprint was generated). Existing candidate exclusions still apply; enabling logging later does not reanalyze excluded keys.
+
+Full request details have an independent opt-in: `IncludeFullRequestKeyInLogs` defaults to `false`. Enable it through `AddCacheAnalyzer` options, the bound configuration section, or `[CacheAnalyze(IncludeFullRequestKeyInLogs = true)]`. Minimal API metadata uses the same named property. Either the global or endpoint opt-in retains the full key in `ResponseAnalysis.FullRequestKey` and emits a separate `FullRequestKey` log field. The full key contains method, URL, query values, and for QUERY requests the body hash and content metadata; it never contains the raw QUERY body. Fingerprint logging and full-request logging are independent:
+
+```json
+{
+  "CacheAnalyzer": {
+    "IncludeFullRequestKeyInLogs": false,
+    "IncludeFingerprintInLogs": false
+  }
+}
+```
+
+The built-in adapters use hashed identities for observation history, candidate lookup, and slow exclusions (including GET path groups). `ResponseAnalysis.FingerprintRequest` exposes that identity; `RequestKey` is now an alias for `FingerprintRequest`, not the previous full request string. `ResponseAnalysis.FingerprintResponse` exposes the response-body hash. The JSON fields are named `fingerprintRequest` and `fingerprintResponse`, replacing the earlier `RequestId` and `Fingerprint` fields. Candidate snapshots retain the safe endpoint label and omit `FullRequestKey` unless opted in. This is a behavior/schema change for consumers of the old properties and log fields. Direct callers of history or slow-exclusion services choose their own keys; those services do not automatically hash arbitrary caller-supplied keys. Matching uses the full request identity, not the route template, so grouping the readable labels does not merge different query variants. Opting in after a key was excluded does not recreate its earlier finding; start a fresh analysis run to reassess it.
+
+## Privacy and data handling
+
+Analysis runs locally within the host application, with no built-in outbound transport. The built-in runtime adapters do not initiate outbound HTTP calls to send analysis data. The default history and candidate store retain fingerprints in managed process memory on the host's machine; fingerprints are excluded from default logs unless explicitly enabled. Configured logging providers, custom sinks, and replacement analysis services can export or persist data, so the host application controls those destinations. This describes the built-in analysis behavior, not a guarantee about every dependency or the host application's other activity.
+
+In-process storage is not a guarantee that bytes remain exclusively in RAM or are inaccessible. Process/crash dumps and operating-system paging can contain fingerprints, request keys, and temporarily captured response bytes. QUERY request-body buffering may also use temporary files through ASP.NET Core's buffering facilities. Clearing collections or disposing buffers does not securely erase their contents or force immediate reclamation. Access to dumps, paging storage, logs, and temporary files is governed by the client's hosting environment.
+
+The built-in fingerprint provider uses SHA-256, a one-way hash of response bytes, not encryption or guaranteed anonymization. Predictable payloads or request keys can be guessed and hashed for comparison. Full request keys are constructed transiently to compute identities; raw request data also remains part of the host's normal request processing and can appear in dumps. By default, built-in analysis stores retain hashed request/path identities and safe route labels, and the logging sink emits those rather than full request details. Explicitly enabling full-request logging also retains those details in candidate findings. Declared route templates can themselves contain sensitive literals; choose route definitions accordingly. Other application/server logs, configured scopes, custom sinks, and exceptions may disclose request details independently of these options.
+
 The ASP.NET Core adapter forwards every response write to the original stream and retains a separate copy up to `MaximumPayloadBytes` for analysis. It checks the declared Content-Length (when available) and accumulated size when capturing each write. If either exceeds the limit, it discards the analysis copy and skips fingerprinting; response forwarding continues without replaying bytes. It does not change headers, status, or payload. Responses exactly at the limit remain eligible. Capture capacity is capped at the configured limit (and the runtime array limit); eligible responses still allocate a second byte-array copy for fingerprinting. This is a per-response bound, not a total memory or concurrent-request limit, and does not limit QUERY request buffering. Copying, allocations, hashing, and stream adaptation add overhead and can affect timing. Hashing and reporting run after the downstream pipeline returns and can delay request completion. The .NET Framework sample adapter still checks payload size after buffering.
 
 ### Supported endpoint scope
 
 Prefer endpoint opt-in for ordinary, finite responses with small payloads. Writes and `Flush()` / `FlushAsync()` are forwarded to the original response stream while the analysis copy remains available for fingerprinting. Calling flush alone does not disqualify a response. Do not enable analysis broadly for indefinite streaming APIs or large-content endpoints: analysis needs a completed response, and oversized payloads are not fingerprinted.
+
+Do not opt in endpoints whose response payload or individual fields use randomized application-level encryption when your goal is to assess stability of the underlying plaintext. Fresh nonces/IVs can produce different ciphertext for identical plaintext on each call. CacheAnalyzer compares the response bytes it observes, so these responses can produce `ResponseChanged` even when the underlying values have not changed. Randomized encryption in QUERY request bodies likewise produces different request identities, splitting observations across keys instead of accumulating evidence for one logical query. CacheAnalyzer does not decrypt, normalize, or rewrite encrypted data. This limitation concerns payload/field encryption, not HTTPS/TLS transport encryption, which is outside the application response bytes being analyzed. Stable ciphertext can still be compared byte-for-byte, but matching ciphertext does not establish whether replaying an encrypted response is appropriate for the application's security semantics.
+
+Volatile response fields such as `readAt`, a current timestamp, request IDs, or random values also change the fingerprint even when the business data is unchanged. CacheAnalyzer reports byte-level changes, not semantic differences: it does not parse payload fields or exclude selected properties before hashing. Ignoring a timestamp would require payload-aware normalization for analysis and application-specific decisions about whether that field can safely be replayed. The built-in analyzer deliberately does not do this. Keep these endpoints outside analysis when you only want to evaluate the stable business data. A stored date such as `lastModified` is not inherently a problem if it remains unchanged between matching responses.
 
 **Avoid enabling CacheAnalyzer on endpoints where low time to first byte or prompt delivery of flushed chunks is critical**, such as server-sent events or live incremental responses. Analyzer setup can delay the first response bytes, and copying after a write can delay the next flush or write. Forwarding to the original response stream does not guarantee delivery to the client at that point; other middleware and the server may also buffer data. CacheAnalyzer preserves response content, but does not guarantee unchanged delivery timing. Keep these endpoints outside analysis, or validate the added latency in your actual pipeline before opting them in.
 
@@ -153,3 +212,5 @@ public sealed class SplunkResponseAnalysisSink : IResponseAnalysisSink
 ```
 
 This utility identifies opportunities to add caching elsewhere. It does not itself save response bandwidth, cache responses, or avoid endpoint execution.
+
+Deferred ideas, including optional sub-payload mappings for analysis, are tracked in [TODO.md](TODO.md).

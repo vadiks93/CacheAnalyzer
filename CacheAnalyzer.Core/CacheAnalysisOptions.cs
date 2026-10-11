@@ -4,6 +4,12 @@ public sealed class CacheAnalysisOptions
 {
     public bool Enabled { get; set; } = true;
 
+    /// <summary>Opt in to including response fingerprints in the default analysis logs.</summary>
+    public bool IncludeFingerprintInLogs { get; set; } = false;
+
+    /// <summary>Opt in to retaining and logging the full request key, including query values.</summary>
+    public bool IncludeFullRequestKeyInLogs { get; set; } = false;
+
     /// <summary>
     /// Stop analysis after exceeding this number of distinct cache candidates (default 200).
     /// Findings are preserved; capacity accounting is best effort under concurrency.

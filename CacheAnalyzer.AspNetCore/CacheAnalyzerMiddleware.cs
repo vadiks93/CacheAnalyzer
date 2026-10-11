@@ -1,6 +1,7 @@
 using CacheAnalyzer.Core;
 using CacheAnalyzerHelper;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
@@ -54,16 +55,19 @@ public sealed class CacheAnalyzerMiddleware
 
 
         var requestKey = await CreateRequestKeyAsync(context.Request);
-        if (_candidates.Contains(requestKey))
+        var requestId = RequestIdentity.Create(requestKey);
+        var routeTemplate = (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText;
+        var endpoint = $"{context.Request.Method} {(routeTemplate is null ? "(unmapped endpoint)" : "/" + routeTemplate.TrimStart('/'))}";
+        if (_candidates.Contains(requestId))
         {
             await _next(context);
             return;
         }
         // Group only GET query variants; QUERY request bodies retain their own identity.
         var getPathKey = HttpMethods.IsGet(context.Request.Method)
-            ? $"GET {context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{context.Request.Path}"
+            ? RequestIdentity.Create($"GET {context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{context.Request.Path}")
             : null;
-        if (_slowFingerprints.IsExcluded(requestKey, getPathKey, options))
+        if (_slowFingerprints.IsExcluded(requestId, getPathKey, options))
         {
             await _next(context);
             return;
@@ -71,6 +75,10 @@ public sealed class CacheAnalyzerMiddleware
         #endregion
 
         var originalBody = context.Response.Body;
+        var includeFingerprintInLogs = options.IncludeFingerprintInLogs ||
+            context.GetEndpoint()?.Metadata.GetMetadata<CacheAnalyzeAttribute>()?.IncludeFingerprintInLogs == true;
+        var includeFullRequestKeyInLogs = options.IncludeFullRequestKeyInLogs ||
+            context.GetEndpoint()?.Metadata.GetMetadata<CacheAnalyzeAttribute>()?.IncludeFullRequestKeyInLogs == true;
 
         await using var bufferedBody = new LimitedResponseBuffer(originalBody, context.Response, options.MaximumPayloadBytes);
         context.Response.Body = bufferedBody;
@@ -95,7 +103,10 @@ public sealed class CacheAnalyzerMiddleware
                         CacheRecommendation.PayloadTooLarge,
                         bufferedBody.BytesWritten,
                         TimeSpan.Zero,
-                        null));
+                        null,
+                        includeFingerprintInLogs: includeFingerprintInLogs,
+                        endpoint: endpoint,
+                        includeFullRequestKeyInLogs: includeFullRequestKeyInLogs));
                 return;
             }
 
@@ -106,7 +117,7 @@ public sealed class CacheAnalyzerMiddleware
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
             {
-                var slowResult = _slowFingerprints.RecordSlowRequest(requestKey, getPathKey, options);
+                var slowResult = _slowFingerprints.RecordSlowRequest(requestId, getPathKey, options);
                 if (slowResult == SlowFingerprintRecordResult.CapacityExceeded)
                 {
                     if (Interlocked.Exchange(ref _analysisStopped, 1) == 0)
@@ -121,8 +132,8 @@ public sealed class CacheAnalyzerMiddleware
                 if (slowResult == SlowFingerprintRecordResult.PathExcluded)
                 {
                     logger.LogInformation(
-                        "Cache analysis excluded {Path} after exceeding {MaximumSlowFingerprintRequestsPerPath} distinct slow fingerprint query variants. Other paths continue analysis.",
-                        getPathKey, options.MaximumSlowFingerprintRequestsPerPath);
+                        "Cache analysis excluded {Endpoint} (path ID {PathId}) after exceeding {MaximumSlowFingerprintRequestsPerPath} distinct slow fingerprint query variants. Other paths continue analysis.",
+                        endpoint, getPathKey, options.MaximumSlowFingerprintRequestsPerPath);
                 }
                 Report(
                     sinks,
@@ -132,7 +143,10 @@ public sealed class CacheAnalyzerMiddleware
                         CacheRecommendation.FingerprintTooSlow,
                         responseBytes.LongLength,
                         stopwatch.Elapsed,
-                        fingerprint));
+                        fingerprint,
+                        includeFingerprintInLogs: includeFingerprintInLogs,
+                        endpoint: endpoint,
+                        includeFullRequestKeyInLogs: includeFullRequestKeyInLogs));
                 return;
             }
             #endregion
@@ -140,7 +154,7 @@ public sealed class CacheAnalyzerMiddleware
             // Once hashing has started, let this request finish analysis and reporting.
             // Shutdown may overlap; the finally block releases any late observations.
             var historyResult = history.Observe(
-                requestKey,
+                requestId,
                 fingerprint,
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
@@ -150,7 +164,10 @@ public sealed class CacheAnalyzerMiddleware
                     historyResult.Recommendation,
                     responseBytes.LongLength,
                     stopwatch.Elapsed,
-                    fingerprint);
+                    fingerprint,
+                    includeFingerprintInLogs: includeFingerprintInLogs,
+                    endpoint: endpoint,
+                    includeFullRequestKeyInLogs: includeFullRequestKeyInLogs);
             // Other requests may already be analyzing this key. Preserve and report
             // only its first candidate finding; no requests wait for one another.
             if (analysis.Recommendation != CacheRecommendation.CacheCandidate ||
@@ -254,7 +271,7 @@ public sealed class CacheAnalyzerMiddleware
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "A cache analysis sink failed for {RequestKey}", analysis.RequestKey);
+                logger.LogError(exception, "A cache analysis sink failed for {Endpoint} (fingerprintRequest={fingerprintRequest})", analysis.Endpoint, analysis.FingerprintRequest);
             }
         }
     }

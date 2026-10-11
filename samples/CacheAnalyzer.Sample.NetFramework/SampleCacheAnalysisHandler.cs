@@ -58,8 +58,10 @@ namespace CacheAnalyzer.Sample.NetFramework
                         });
                 }
 
-                var getPathKey = isQuery ? null : "GET " + request.RequestUri.GetLeftPart(UriPartial.Path);
-                if (Candidates.Contains(key) || slowFingerprints.IsExcluded(key, getPathKey, options))
+                var requestId = RequestIdentity.Create(key);
+                var displayKey = options.IncludeFullRequestKeyInLogs ? key : requestId;
+                var getPathKey = isQuery ? null : RequestIdentity.Create("GET " + request.RequestUri.GetLeftPart(UriPartial.Path));
+                if (Candidates.Contains(requestId) || slowFingerprints.IsExcluded(requestId, getPathKey, options))
                     return await base.SendAsync(request, cancellationToken);
 
                 var response = await base.SendAsync(request, cancellationToken);
@@ -70,7 +72,7 @@ namespace CacheAnalyzer.Sample.NetFramework
                 var bytes = await response.Content.ReadAsByteArrayAsync();
                 if (bytes.LongLength > options.MaximumPayloadBytes)
                 {
-                    Console.WriteLine("{0}: {1}, {2} bytes", key, CacheRecommendation.PayloadTooLarge, bytes.Length);
+                    Console.WriteLine("{0}: {1}, {2} bytes", displayKey, CacheRecommendation.PayloadTooLarge, bytes.Length);
                     return response;
                 }
                 var watch = Stopwatch.StartNew();
@@ -78,7 +80,7 @@ namespace CacheAnalyzer.Sample.NetFramework
                 watch.Stop();
                 if (watch.Elapsed > options.MaximumFingerprintDuration)
                 {
-                    var slowResult = slowFingerprints.RecordSlowRequest(key, getPathKey, options);
+                    var slowResult = slowFingerprints.RecordSlowRequest(requestId, getPathKey, options);
                     if (slowResult == SlowFingerprintRecordResult.CapacityExceeded)
                     {
                         if (Interlocked.Exchange(ref analysisStopped, 1) == 0)
@@ -92,16 +94,17 @@ namespace CacheAnalyzer.Sample.NetFramework
                     {
                         Console.WriteLine("Cache analysis excluded {0} after exceeding {1} distinct slow fingerprint query variants. Other paths continue analysis.", getPathKey, options.MaximumSlowFingerprintRequestsPerPath);
                     }
-                    Console.WriteLine("{0}: {1}, {2} bytes", key, CacheRecommendation.FingerprintTooSlow, bytes.Length);
+                    Console.WriteLine("{0}: {1}, {2} bytes", displayKey, CacheRecommendation.FingerprintTooSlow, bytes.Length);
                     return response;
                 }
 
                 // Hashing already started; allow late observations and clean up in finally.
-                var observation = history.Observe(key, fingerprint, bytes.LongLength, DateTimeOffset.UtcNow, options);
-                var analysis = new ResponseAnalysis(key, observation.Recommendation, bytes.LongLength, watch.Elapsed, fingerprint);
+                var observation = history.Observe(requestId, fingerprint, bytes.LongLength, DateTimeOffset.UtcNow, options);
+                var analysis = new ResponseAnalysis(key, observation.Recommendation, bytes.LongLength, watch.Elapsed, fingerprint,
+                    includeFullRequestKeyInLogs: options.IncludeFullRequestKeyInLogs);
                 if (observation.Recommendation != CacheRecommendation.CacheCandidate ||
                     (Volatile.Read(ref analysisStopped) == 0 && Candidates.TryAdd(analysis)))
-                    Console.WriteLine("{0}: {1}, {2} bytes", key, observation.Recommendation, bytes.Length);
+                    Console.WriteLine("{0}: {1}, {2} bytes", displayKey, observation.Recommendation, bytes.Length);
                 if (!StopAtCandidateCapacity()) StopAtCapacity();
                 return response;
             }
