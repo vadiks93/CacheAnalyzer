@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CacheAnalyzer.AspNetCore.Services.Reporting;
 
-public sealed class LoggingResponseAnalysisSink : IResponseAnalysisSink
+internal sealed class LoggingResponseAnalysisSink : IResponseAnalysisSink
 {
     private readonly ILogger<LoggingResponseAnalysisSink> _logger;
 

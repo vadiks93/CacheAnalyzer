@@ -17,7 +17,7 @@ using System.Security.Cryptography;
 
 namespace CacheAnalyzer.AspNetCore.Middleware;
 
-public sealed class CacheAnalyzerMiddleware
+internal sealed class CacheAnalyzerMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly CacheCandidateStore _cacheableCandidates;
@@ -25,6 +25,8 @@ public sealed class CacheAnalyzerMiddleware
     // Volatile reads provide cross-thread visibility of shutdown without locking.
     // In-flight analysis remains best effort; the atomic transition selects one logger.
     private int _analysisStopped;
+    // 0 = not started, 1 = active, 2 = disabled. Transitions are advisory snapshots.
+    private int _lifecycleState;
 
     public CacheAnalyzerMiddleware(RequestDelegate next, CacheCandidateStore? candidates = null)
     {
@@ -49,7 +51,17 @@ public sealed class CacheAnalyzerMiddleware
         }
 
         var options = optionsMonitor.CurrentValue;
-        if (!options.Enabled || !runtimeControl.IsEnabled || !ShouldAnalyze(context, options))
+        if (!options.Enabled || !runtimeControl.IsEnabled)
+        {
+            if (Interlocked.CompareExchange(ref _lifecycleState, 2, 1) == 1)
+            {
+                logger.LogInformation(
+                    "Cache analysis stopped because configuration or runtime control disabled it. Retained state was preserved; analysis can resume when enabled.");
+            }
+            await _next(context);
+            return;
+        }
+        if (!ShouldAnalyze(context, options))
         {
             await _next(context);
             return;
@@ -81,6 +93,16 @@ public sealed class CacheAnalyzerMiddleware
             return;
         }
         #endregion
+
+        var previousState = Interlocked.Exchange(ref _lifecycleState, 1);
+        if (previousState == 0)
+        {
+            logger.LogInformation("Cache analysis started on the first eligible request for this pipeline.");
+        }
+        else if (previousState == 2)
+        {
+            logger.LogInformation("Cache analysis resumed after configuration and runtime control enabled it.");
+        }
 
         var originalBody = context.Response.Body;
         var includeFingerprintInLogs = options.IncludeFingerprintInLogs ||

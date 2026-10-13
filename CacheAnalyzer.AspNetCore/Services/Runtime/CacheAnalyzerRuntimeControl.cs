@@ -1,6 +1,6 @@
 namespace CacheAnalyzer.AspNetCore.Services.Runtime;
 
-public sealed class CacheAnalyzerRuntimeControl : ICacheAnalyzerRuntimeControl
+internal sealed class CacheAnalyzerRuntimeControl : ICacheAnalyzerRuntimeControl
 {
     private volatile bool _isEnabled = true;
 

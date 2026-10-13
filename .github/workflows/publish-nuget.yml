@@ -1,0 +1,87 @@
+name: Publish NuGet packages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-nuget-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    environment: nuget
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Determine package version
+        run: |
+          [xml]$properties = Get-Content -LiteralPath Directory.Build.props -Raw
+          $localVersion = [version]$properties.Project.PropertyGroup[0].Version
+          $packageVersion = "$($localVersion.Major).$($localVersion.Minor).$env:GITHUB_RUN_NUMBER"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PACKAGE_VERSION=$packageVersion"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Package version: **$packageVersion**"
+          Write-Host "Building and publishing version $packageVersion"
+
+      - name: Restore
+        run: dotnet restore CacheAnalyzer.slnx -p:Version=$env:PACKAGE_VERSION
+
+      - name: Build
+        run: dotnet build CacheAnalyzer.slnx --configuration Release --no-restore -p:Version=$env:PACKAGE_VERSION
+
+      - name: Test
+        run: dotnet CacheAnalyzerHelper.Tests/bin/Release/net10.0/CacheAnalyzerHelper.Tests.dll
+
+      - name: Pack libraries
+        run: |
+          $projects = @('CacheAnalyzer.Core', 'CacheAnalyzerHelper', 'CacheAnalyzer.AspNetCore')
+          foreach ($project in $projects) {
+            dotnet pack "$project/$project.csproj" --configuration Release --no-build --output artifacts/packages -p:Version=$env:PACKAGE_VERSION
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Validate NuGet configuration
+        env:
+          NUGET_USER: ${{ vars.NUGET_USER }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_USER)) {
+            throw 'Set the NUGET_USER variable in the nuget GitHub environment to your nuget.org profile username.'
+          }
+
+      - name: Authenticate to NuGet
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Publish packages in dependency order
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          $packageIds = @('CacheAnalyzer.Core', 'CacheAnalyzerHelper', 'CacheAnalyzer.AspNetCore')
+          foreach ($packageId in $packageIds) {
+            $packages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter "$packageId.$env:PACKAGE_VERSION.nupkg")
+            if ($packages.Count -ne 1) { throw "Expected one package for $packageId; found $($packages.Count)." }
+            dotnet nuget push $packages[0].FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

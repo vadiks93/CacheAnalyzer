@@ -21,6 +21,59 @@ public sealed class CacheAnalyzerMiddlewareTests
 {
     private const string ResponseJson = "{\"id\":42,\"name\":\"cached value\"}";
 
+    [Fact]
+    public async Task ConcurrentEligibleRequests_LogStartOnceAndPreserveResponses()
+    {
+        var logger = new CollectingLogger();
+        var middleware = CreateMiddleware();
+        var history = new InMemoryResponseFingerprintHistory();
+        var options = new CacheAnalysisOptions { MaximumFingerprintDuration = TimeSpan.MaxValue };
+        var contexts = Enumerable.Range(0, 32).Select(_ => CreateContext()).ToArray();
+
+        await Task.WhenAll(contexts.Select(context => Task.Run(() =>
+            InvokeAsync(middleware, context, history: history, options: options, logger: logger))));
+
+        Assert.Single(logger.Messages, message => message.Contains("analysis started"));
+        Assert.Single(logger.Levels);
+        Assert.All(contexts, context => Assert.Equal(ResponseJson, ReadBody(context)));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DisableAndResume_LogTransitionsWithoutRepeatingStart(bool useConfiguration)
+    {
+        var logger = new CollectingLogger();
+        var middleware = CreateMiddleware();
+        var options = new CacheAnalysisOptions { MaximumFingerprintDuration = TimeSpan.MaxValue };
+        var control = new CacheAnalyzerRuntimeControl();
+
+        options.Enabled = false;
+        await InvokeAsync(middleware, CreateContext(), options: options, runtimeControl: control, logger: logger);
+        options.Enabled = true;
+        await InvokeAsync(middleware, CreateContext(tagged: false), options: options, runtimeControl: control, logger: logger);
+        Assert.Empty(logger.Messages);
+
+        await InvokeAsync(middleware, CreateContext(), options: options, runtimeControl: control, logger: logger);
+        if (useConfiguration) options.Enabled = false;
+        else control.Disable();
+        for (var i = 0; i < 3; i++)
+        {
+            var context = CreateContext();
+            await InvokeAsync(middleware, context, new ThrowingFingerprintProvider(), options: options, runtimeControl: control, logger: logger);
+            Assert.Equal(ResponseJson, ReadBody(context));
+        }
+        options.Enabled = true;
+        control.Enable();
+        await InvokeAsync(middleware, CreateContext(), options: options, runtimeControl: control, logger: logger);
+        await InvokeAsync(middleware, CreateContext(), options: options, runtimeControl: control, logger: logger);
+
+        Assert.Single(logger.Messages, message => message.Contains("analysis started"));
+        Assert.Single(logger.Messages, message => message.Contains("analysis stopped"));
+        Assert.Single(logger.Messages, message => message.Contains("analysis resumed"));
+        Assert.All(logger.Levels, level => Assert.Equal(LogLevel.Information, level));
+    }
+
     [Theory]
     [InlineData("GET")]
     [InlineData("QUERY")]
@@ -204,7 +257,9 @@ public sealed class CacheAnalyzerMiddlewareTests
 
         Assert.Equal(0, history.GetCountDistinctRequests());
         Assert.Single(sink.Analyses);
-        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+        Assert.All(logger.Levels, level => Assert.Equal(LogLevel.Information, level));
+        Assert.Single(logger.Messages, message => message.Contains("analysis started"));
+        Assert.Single(logger.Messages, message => message.Contains("analysis stopped"));
     }
 
     [Theory]
@@ -231,7 +286,8 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(ResponseJson, ReadBody(context));
         Assert.Empty(sink.Analyses);
         Assert.Equal(0, history.GetCountDistinctRequests());
-        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+        Assert.All(logger.Levels, level => Assert.Equal(LogLevel.Information, level));
+        Assert.Contains("analysis stopped", Assert.Single(logger.Messages));
     }
 
     [Fact]
@@ -270,7 +326,8 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(ResponseJson, ReadBody(paused));
         Assert.Equal(0, history.GetCountDistinctRequests());
         Assert.Single(sink.Analyses);
-        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
+        Assert.All(logger.Levels, level => Assert.Equal(LogLevel.Information, level));
+        Assert.Single(logger.Messages, message => message.Contains("analysis stopped"));
     }
 
     [Fact]
@@ -394,9 +451,9 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Equal(2, history.GetCountDistinctRequests());
         Assert.Equal(4, sink.Analyses.Count);
         Assert.Equal(CacheRecommendation.FirstObservation, sink.Analyses[3].Recommendation);
-        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
-        Assert.DoesNotContain("/slow", Assert.Single(logger.Messages));
-        Assert.Contains("path ID", Assert.Single(logger.Messages));
+        Assert.All(logger.Levels, level => Assert.Equal(LogLevel.Information, level));
+        Assert.DoesNotContain("/slow", Assert.Single(logger.Messages, message => !message.Contains("analysis started")));
+        Assert.Contains("path ID", Assert.Single(logger.Messages, message => !message.Contains("analysis started")));
     }
 
     [Fact]
@@ -446,8 +503,8 @@ public sealed class CacheAnalyzerMiddlewareTests
         }
         Assert.Equal(0, history.GetCountDistinctRequests());
         Assert.Equal(2, sink.Analyses.Count);
-        Assert.Equal(LogLevel.Information, Assert.Single(logger.Levels));
-        Assert.Contains("analysis stopped", Assert.Single(logger.Messages));
+        Assert.All(logger.Levels, level => Assert.Equal(LogLevel.Information, level));
+        Assert.Contains("analysis stopped", Assert.Single(logger.Messages, message => !message.Contains("analysis started")));
     }
 
     [Fact]

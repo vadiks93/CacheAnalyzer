@@ -1,0 +1,24 @@
+<Project>
+  <PropertyGroup>
+    <!-- Local version. CI keeps major/minor and uses the workflow run number as patch. -->
+    <Version>0.1.0</Version>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'CacheAnalyzer.Core' Or '$(MSBuildProjectName)' == 'CacheAnalyzerHelper' Or '$(MSBuildProjectName)' == 'CacheAnalyzer.AspNetCore'">
+    <IsPackable>true</IsPackable>
+    <Authors>vadiks93</Authors>
+    <RepositoryUrl>https://github.com/vadiks93/CacheAnalyzer</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/vadiks93/CacheAnalyzer</PackageProjectUrl>
+    <PackageTags>cache;analysis;aspnetcore</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Description>Advisory response analysis for discovering caching opportunities without modifying HTTP responses.</Description>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'CacheAnalyzer.Core' Or '$(MSBuildProjectName)' == 'CacheAnalyzerHelper' Or '$(MSBuildProjectName)' == 'CacheAnalyzer.AspNetCore'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" />
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

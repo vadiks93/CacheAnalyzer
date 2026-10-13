@@ -1,5 +1,7 @@
 # CacheAnalyzer
 
+Licensed under the [MIT License](LICENSE).
+
 CacheAnalyzer separates response analysis from framework-specific HTTP behavior.
 
 ## Scope
@@ -15,6 +17,8 @@ Outbound `HttpClient`, typed API-client, and internal service-call analysis are 
 
 ## Projects
 
+NuGet release workflow and account setup are documented in [publishing setup](.github/NUGET-PUBLISHING.md).
+
 Runnable ASP.NET Core (.NET 10) and .NET Framework 4.8 Web API samples, request examples, and smoke checks are in [samples](samples/README.md).
 
 - `CacheAnalyzer.Core` targets `netstandard2.0` and owns response fingerprinting.
@@ -29,7 +33,11 @@ The adapter groups types under `Middleware`, `IO`, `Extensions`, `Services.Runti
 
 This namespace reorganization is a breaking change for consumers: update imports and fully qualified type names to the new namespaces. The logging category is now `CacheAnalyzer.AspNetCore.Services.Reporting.LoggingResponseAnalysisSink`. Analysis behavior is unchanged.
 
+The ASP.NET Core adapter exposes registration extensions and `ICacheAnalyzerRuntimeControl`. Its middleware, default logging sink, response buffer, and runtime-control implementation are internal; register them through `AddCacheAnalyzer` and `UseCacheAnalyzer`, and resolve the runtime-control interface from DI. The logging category remains configurable by its name. Core options, analysis models, candidate snapshots, and service contracts remain public. Core's default fingerprint/history implementations, request-identity helper, exclusion tracker, and candidate admission methods also remain public for standalone or alternative framework adapters, as demonstrated by the Framework sample. Method attributes remain public so applications can mark endpoints. These accessibility changes break direct references to the now-internal adapter implementations.
+
 ## ASP.NET Core setup
+
+Once published, install `CacheAnalyzer.AspNetCore` from NuGet; its `CacheAnalyzer.Core` and `CacheAnalyzerHelper` dependencies are installed automatically.
 
 Register CacheAnalyzer in `Program.cs`:
 
@@ -117,6 +125,10 @@ var candidates = app.Services.GetRequiredService<CacheCandidateStore>().GetSnaps
 Candidates are historical findings from this run, not continuously revalidated classifications. Later response changes for excluded keys will not be detected. Rerun analysis after relevant data or application changes, or after changing evaluation settings, by recreating the pipeline with fresh analysis services (normally restarting the application). The candidate store is in-memory and is not preserved across restarts.
 
 The default logging sink includes a structured string property `Cacheable`, rendered as `cacheable=1` for `CacheCandidate`, `cacheable=0` for `ResponseChanged`, `PayloadTooLarge`, or `FingerprintTooSlow`, and `cacheable=unknown` for `FirstObservation` or `InsufficientTraffic`. This is an advisory analysis result under the configured limits, not an HTTP caching directive or proof that caching is impossible. Candidate, oversized, and slow-fingerprint events use Information; changed-response and pending-evidence events use Debug, so enable Debug for this sink to see those events. Excluded or bypassed requests do not produce new analysis events.
+
+The middleware logs `Cache analysis started` at Information once per pipeline instance, when the first eligible request reaches response capture. Capacity shutdown logs the stop reason once. After analysis starts, the first request observing configuration or runtime disablement logs a temporary stop; the next eligible request after re-enabling logs a resume, without repeating the initial start. These lifecycle transitions are best effort under concurrency and follow request observations; changes without another request are not logged. Application shutdown uses the host's normal lifetime logs. Lifecycle logs use the `CacheAnalyzer.AspNetCore.Middleware.CacheAnalyzerMiddleware` category and are subject to the application's log filters.
+
+Timestamps are supplied by the configured logging provider, not guaranteed by `ILogger` itself. The sample and the JSON console configuration below include a UTC `Timestamp` on each emitted console log. Other providers or configurations may format or omit timestamps.
 
 Every analysis event exposes separate structured fields: `Endpoint`, `fingerprintRequest`, `Cacheable`, `Recommendation`, `PayloadBytes`, `FingerprintMilliseconds`, and `TrackingCapacityReached`. `Endpoint` is the method plus declared route template (for example `GET /api/products/{id}`), without actual route-parameter or query values. If route metadata is unavailable, it uses the method plus `(unmapped endpoint)` rather than exposing the actual path. `fingerprintRequest` is a SHA-256/Base64URL hash of the complete request key, preserving separate identities for different origins, literal paths, query strings, and QUERY bodies/content metadata. Recommendations are strings; byte counts and duration are numeric; the capacity flag is boolean. `fingerprintResponse` and `FullRequestKey` are omitted from both the message and structured state by default. The ASP.NET Core sample uses JSON console output, with these fields under `State` alongside the logger's timestamp, category, level, and message. To enable the same format in a consuming ASP.NET Core application's default console provider, add this configuration:
 
