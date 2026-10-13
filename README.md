@@ -21,12 +21,24 @@ Runnable ASP.NET Core (.NET 10) and .NET Framework 4.8 Web API samples, request 
 - `CacheAnalyzerHelper` contains the Metalama `[CacheAnalyzer]` method marker.
 - `CacheAnalyzer.AspNetCore` observes eligible HTTP responses and reports analysis through configured sinks.
 
+### Folder and namespace organization
+
+Namespaces follow each project's folders. Core result types and enums live in `CacheAnalyzer.Core.Models`, configuration in `CacheAnalyzer.Core.Options`, and services in `CacheAnalyzer.Core.Services` subfolders: `Fingerprinting`, `History`, `Candidates`, `Exclusions`, and `Reporting`. Service interfaces share their implementation's folder; the reporting contract is in Core and its logging implementation is in the ASP.NET Core adapter.
+
+The adapter groups types under `Middleware`, `IO`, `Extensions`, `Services.Runtime`, and `Services.Reporting`. Method attributes live in `CacheAnalyzerHelper.Attributes`. Samples separate `Controllers`, `Models`, and framework `Handlers`; shared payload generation uses `CacheAnalyzer.Samples.Shared.Services`. Tests mirror the components they cover.
+
+This namespace reorganization is a breaking change for consumers: update imports and fully qualified type names to the new namespaces. The logging category is now `CacheAnalyzer.AspNetCore.Services.Reporting.LoggingResponseAnalysisSink`. Analysis behavior is unchanged.
+
 ## ASP.NET Core setup
 
 Register CacheAnalyzer in `Program.cs`:
 
 ```csharp
-using CacheAnalyzer.AspNetCore;
+using CacheAnalyzer.AspNetCore.Extensions;
+using CacheAnalyzer.AspNetCore.Services.Runtime;
+using CacheAnalyzer.Core.Models;
+using CacheAnalyzer.Core.Options;
+using CacheAnalyzerHelper.Attributes;
 
 builder.Services.AddCacheAnalyzer(options =>
 {
@@ -120,7 +132,7 @@ Every analysis event exposes separate structured fields: `Endpoint`, `fingerprin
       }
     },
     "LogLevel": {
-      "CacheAnalyzer.AspNetCore.LoggingResponseAnalysisSink": "Debug"
+      "CacheAnalyzer.AspNetCore.Services.Reporting.LoggingResponseAnalysisSink": "Debug"
     }
   }
 }

@@ -1,8 +1,6 @@
 using System;
 using System.Threading;
-using System.Web.Http;
 using Microsoft.Owin.Hosting;
-using Owin;
 
 namespace CacheAnalyzer.Sample.NetFramework
 {
@@ -22,14 +20,4 @@ namespace CacheAnalyzer.Sample.NetFramework
         }
     }
 
-    public sealed class Startup
-    {
-        public void Configuration(IAppBuilder app)
-        {
-            var config = new HttpConfiguration();
-            config.MapHttpAttributeRoutes();
-            config.MessageHandlers.Add(new SampleCacheAnalysisHandler());
-            app.UseWebApi(config);
-        }
-    }
 }

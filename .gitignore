@@ -33,3 +33,5 @@ appsettings.*.local.json
 .DS_Store
 Thumbs.db
 
+
+.fake

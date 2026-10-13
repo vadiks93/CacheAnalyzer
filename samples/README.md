@@ -95,7 +95,7 @@ The mixed sequence is per host process and shared by callers; restart the host f
 
 Formats other than JSON are useful because fingerprinting compares **exact bytes**. XML, CSV, text, and binary files work the same way; even whitespace changes or reordered JSON properties change the fingerprint. This is not semantic content comparison.
 
-The CSV source in `Shared/Assets` is copied to each application's output `Assets` folder during build. File examples load or generate bounded byte arrays; they do not demonstrate streaming, range requests, or arbitrarily large file handling. `Shared/SamplePayloads.cs` provides identical payload generation to both hosts.
+The CSV source in `Shared/Assets` is copied to each application's output `Assets` folder during build. File examples load or generate bounded byte arrays; they do not demonstrate streaming, range requests, or arbitrarily large file handling. `Shared/Services/SamplePayloads.cs` provides identical payload generation to both hosts.
 
 ## Integration differences
 
