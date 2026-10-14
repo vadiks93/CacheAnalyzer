@@ -14,10 +14,8 @@ Outbound `HttpClient` and typed API-client analysis is deferred and is not part 
 - Separate framework-neutral analysis from framework adapters.
 - `CacheAnalyzer.Core` targets `netstandard2.0` so it can be reused by modern .NET and a future .NET Framework adapter.
 - `CacheAnalyzer.AspNetCore` observes HTTP responses and publishes analysis; it does not alter HTTP caching behavior.
-- `CacheAnalyzerHelper` currently owns the Metalama `[CacheAnalyzer]` method marker.
+- `CacheAnalyzerHelper` owns the ordinary .NET `[CacheAnalyze]` endpoint attribute and obsolete `[CacheAnalyzer]` alias. Middleware reads their runtime metadata; no aspect weaving is used.
 - A future `CacheAnalyzer.AspNet` adapter can implement System.Web behavior without changing the core.
-- Metalama template source is compile-time code. Runtime template statements are woven into the target method and can be debugged in `obj/LamaDebug/<TFM>/metalama`.
-- `LamaDebug` is the Metalama build configuration used to emit readable transformed source and matching debug symbols.
 
 ## HTTP Semantics
 
