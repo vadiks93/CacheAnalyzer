@@ -21,6 +21,45 @@ public sealed class CacheAnalyzerMiddlewareTests
 {
     private const string ResponseJson = "{\"id\":42,\"name\":\"cached value\"}";
 
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("QUERY")]
+    public async Task Only200Responses_ContributeToHistory_WhenPayloadIsIdentical(string method)
+    {
+        var history = new InMemoryResponseFingerprintHistory();
+        var sink = new CollectingSink();
+        var candidates = new CacheCandidateStore();
+        var status = 200;
+        var middleware = new CacheAnalyzerMiddleware(async ctx =>
+        {
+            ctx.Response.StatusCode = status;
+            ctx.Response.ContentType = "application/json";
+            ctx.Response.Headers.ETag = "\"application-owned\"";
+            await ctx.Response.WriteAsync(ResponseJson);
+        }, candidates);
+        var options = new CacheAnalysisOptions { MaximumFingerprintDuration = TimeSpan.MaxValue };
+
+        foreach (var code in new[] { 200, 201, 202, 204, 206, 301, 304, 404, 500, 200 })
+        {
+            status = code;
+            var context = CreateContext();
+            context.Request.Method = method;
+            await InvokeAsync(middleware, context,
+                provider: code == 200 ? new Sha256ResponseFingerprintProvider() : new ThrowingFingerprintProvider(),
+                history: history, options: options, sinks: [sink]);
+            Assert.Equal(code, context.Response.StatusCode);
+            Assert.Equal(ResponseJson, ReadBody(context));
+            Assert.Equal("application/json", context.Response.ContentType);
+            Assert.Equal("\"application-owned\"", context.Response.Headers.ETag);
+        }
+
+        Assert.Equal(2, sink.Analyses.Count);
+        Assert.Equal(CacheRecommendation.FirstObservation, sink.Analyses[0].Recommendation);
+        Assert.Equal(CacheRecommendation.InsufficientTraffic, sink.Analyses[1].Recommendation);
+        Assert.Equal(1, history.GetCountDistinctRequests());
+        Assert.Empty(candidates.GetSnapshot());
+    }
+
     [Fact]
     public async Task ConcurrentEligibleRequests_LogStartOnceAndPreserveResponses()
     {
@@ -357,7 +396,7 @@ public sealed class CacheAnalyzerMiddlewareTests
             if (bypass) Assert.Same(ctx.Items["originalBody"], ctx.Response.Body);
             ctx.Response.ContentType = "application/json";
             ctx.Response.ContentLength = Encoding.UTF8.GetByteCount(ResponseJson);
-            ctx.Response.StatusCode = 202;
+            ctx.Response.StatusCode = 200;
             ctx.Response.Headers.ETag = "\"owned\"";
             await ctx.Response.WriteAsync(ResponseJson);
         });
@@ -371,7 +410,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         repeat.Items["originalBody"] = repeat.Response.Body;
         await InvokeAsync(middleware, repeat, new ThrowingFingerprintProvider(), history, options, [sink]);
         Assert.Equal(ResponseJson, ReadBody(repeat));
-        Assert.Equal(202, repeat.Response.StatusCode);
+        Assert.Equal(200, repeat.Response.StatusCode);
         Assert.Equal("application/json", repeat.Response.ContentType);
         Assert.Equal((long)Encoding.UTF8.GetByteCount(ResponseJson), repeat.Response.ContentLength);
         Assert.Equal("\"owned\"", repeat.Response.Headers.ETag);
@@ -472,7 +511,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         var middleware = new CacheAnalyzerMiddleware(async ctx =>
         {
             if (bypass) Assert.Same(ctx.Items["originalBody"], ctx.Response.Body);
-            ctx.Response.StatusCode = 202;
+            ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/json";
             ctx.Response.ContentLength = Encoding.UTF8.GetByteCount(ResponseJson);
             ctx.Response.Headers.ETag = "\"owned\"";
@@ -484,7 +523,7 @@ public sealed class CacheAnalyzerMiddlewareTests
             context.Request.Path = "/slow/" + i;
             await InvokeAsync(middleware, context, new SlowFingerprintProvider(), history, options, [sink], logger: logger);
             Assert.Equal(ResponseJson, ReadBody(context));
-            Assert.Equal(202, context.Response.StatusCode);
+            Assert.Equal(200, context.Response.StatusCode);
             Assert.Equal("\"owned\"", context.Response.Headers.ETag);
         }
         bypass = true;
@@ -496,7 +535,7 @@ public sealed class CacheAnalyzerMiddlewareTests
             context.Items["originalBody"] = context.Response.Body;
             await InvokeAsync(middleware, context, new ThrowingFingerprintProvider(), history, options, [sink], logger: logger);
             Assert.Equal(ResponseJson, ReadBody(context));
-            Assert.Equal(202, context.Response.StatusCode);
+            Assert.Equal(200, context.Response.StatusCode);
             Assert.Equal("application/json", context.Response.ContentType);
             Assert.Equal((long)Encoding.UTF8.GetByteCount(ResponseJson), context.Response.ContentLength);
             Assert.Equal("\"owned\"", context.Response.Headers.ETag);
@@ -687,7 +726,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         var history = new InMemoryResponseFingerprintHistory();
         var middleware = new CacheAnalyzerMiddleware(async ctx =>
         {
-            ctx.Response.StatusCode = 202;
+            ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/octet-stream";
             ctx.Response.Headers.ETag = "\"original\"";
             if (declaredLength) ctx.Response.ContentLength = 9;
@@ -714,7 +753,7 @@ public sealed class CacheAnalyzerMiddlewareTests
         Assert.Same(original, context.Response.Body);
         Assert.Equal(Enumerable.Range(0, 9).Select(i => (byte)i).ToArray(), original.ToArray());
         Assert.Equal(declaredLength ? 9L : (long?)null, context.Response.ContentLength);
-        Assert.Equal(202, context.Response.StatusCode);
+        Assert.Equal(200, context.Response.StatusCode);
         Assert.Equal("application/octet-stream", context.Response.ContentType);
         Assert.Equal("\"original\"", context.Response.Headers.ETag);
         var analysis = Assert.Single(sink.Analyses);

@@ -322,8 +322,7 @@ internal sealed class CacheAnalyzerMiddleware
 
     private static bool CanAnalyzeResponse(HttpResponse response)
     {
-        return response.StatusCode >= StatusCodes.Status200OK &&
-               response.StatusCode < StatusCodes.Status300MultipleChoices &&
+        return response.StatusCode == StatusCodes.Status200OK &&
                !response.Headers.CacheControl.Any(
                    value => value?.Contains("no-store", StringComparison.OrdinalIgnoreCase) == true);
     }

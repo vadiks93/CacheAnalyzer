@@ -1,3 +1,0 @@
-# Future work
-
-- [ ] Explore optional per-endpoint mappings that select a stable sub-payload for fingerprinting (for example, JSON `data` without volatile `readAt` metadata). Deferred; no implementation is planned for the current work. Keep complete-response fingerprinting as the default. Any projection must affect only analysis, preserve the original response bytes/headers/status, and clearly label findings as applying to the selected data rather than establishing that the complete response is suitable for caching. Before implementation, decide supported formats, parsing/canonicalization rules, malformed-payload fallback, and bounded parsing/allocation costs. Do not decrypt payloads or add application-level synchronization.

@@ -71,7 +71,7 @@ namespace CacheAnalyzer.Sample.NetFramework.Handlers
 
                 var response = await base.SendAsync(request, cancellationToken);
                 if (Volatile.Read(ref analysisStopped) != 0 ||
-                    !response.IsSuccessStatusCode || response.Content == null || response.Headers.CacheControl?.NoStore == true)
+                    response.StatusCode != System.Net.HttpStatusCode.OK || response.Content == null || response.Headers.CacheControl?.NoStore == true)
                     return response;
 
                 var bytes = await response.Content.ReadAsByteArrayAsync();
