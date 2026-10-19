@@ -19,13 +19,14 @@ internal sealed class LoggingResponseAnalysisSink : IResponseAnalysisSink
         var cacheable = analysis.Recommendation switch
         {
             CacheRecommendation.CacheCandidate => "1",
+            CacheRecommendation.StableDataCandidate => "partial",
             CacheRecommendation.ResponseChanged or
                 CacheRecommendation.PayloadTooLarge or
                 CacheRecommendation.FingerprintTooSlow => "0",
             _ => "unknown"
         };
 
-        var level = analysis.Recommendation is CacheRecommendation.CacheCandidate or
+        var level = analysis.Recommendation is CacheRecommendation.CacheCandidate or CacheRecommendation.StableDataCandidate or
             CacheRecommendation.PayloadTooLarge or CacheRecommendation.FingerprintTooSlow
                 ? LogLevel.Information : LogLevel.Debug;
 
@@ -42,6 +43,11 @@ internal sealed class LoggingResponseAnalysisSink : IResponseAnalysisSink
             analysis.FingerprintDuration.TotalMilliseconds,
             analysis.TrackingCapacityReached
         };
+        template += ", fingerprintComparison={FingerprintComparison}";
+        values.Add(analysis.FingerprintComparison);
+        template += ", fingerprintBytes={FingerprintBytes}, payloadToFingerprintRatio={PayloadToFingerprintRatio}";
+        values.Add(analysis.FingerprintBytes);
+        values.Add(analysis.PayloadToFingerprintRatio);
         if (analysis.IncludeFingerprintInLogs)
         {
             template += ", fingerprintResponse={fingerprintResponse}";

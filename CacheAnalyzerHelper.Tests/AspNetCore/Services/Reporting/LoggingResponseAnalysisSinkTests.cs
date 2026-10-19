@@ -9,6 +9,7 @@ public sealed class LoggingResponseAnalysisSinkTests
 {
     [Theory]
     [InlineData(CacheRecommendation.CacheCandidate, "1", LogLevel.Information)]
+    [InlineData(CacheRecommendation.StableDataCandidate, "partial", LogLevel.Information)]
     [InlineData(CacheRecommendation.ResponseChanged, "0", LogLevel.Debug)]
     [InlineData(CacheRecommendation.PayloadTooLarge, "0", LogLevel.Information)]
     [InlineData(CacheRecommendation.FingerprintTooSlow, "0", LogLevel.Information)]
@@ -23,6 +24,9 @@ public sealed class LoggingResponseAnalysisSinkTests
 
         Assert.Equal(expectedLevel, logger.Level);
         Assert.Equal(expectedStatus, logger.Properties["Cacheable"]);
+        Assert.Equal("ExactBytes", logger.Properties["FingerprintComparison"]);
+        Assert.Equal(13, logger.Properties["FingerprintBytes"]);
+        Assert.Equal(1024d / 13, logger.Properties["PayloadToFingerprintRatio"]);
         Assert.Equal(RequestIdentity.Create("GET /products"), logger.Properties["fingerprintRequest"]);
         Assert.Equal("(unmapped endpoint)", logger.Properties["Endpoint"]);
         Assert.False(logger.Properties.ContainsKey("RequestKey"));
@@ -50,6 +54,31 @@ public sealed class LoggingResponseAnalysisSinkTests
 
         Assert.Equal("internal-hash", logger.Properties["fingerprintResponse"]);
         Assert.Contains("fingerprintResponse=internal-hash", logger.Message);
+    }
+
+    [Theory]
+    [InlineData("ExactBytes", 45)]
+    [InlineData("JsonExclusionsApplied", 67)]
+    [InlineData("JsonExclusionsNotApplied", 70)]
+    public void Ratio_IncludesStoredComparisonMode_WithoutDisclosingFingerprint(string comparison, int expectedSize)
+    {
+        var logger = new CapturingLogger();
+        new LoggingResponseAnalysisSink(logger).Report(new ResponseAnalysis("GET /news",
+            CacheRecommendation.StableDataCandidate, 172400, TimeSpan.Zero, new string('x', 45),
+            fingerprintComparison: comparison));
+        Assert.Equal(expectedSize, logger.Properties["FingerprintBytes"]);
+        Assert.Equal(172400d / expectedSize, logger.Properties["PayloadToFingerprintRatio"]);
+        Assert.False(logger.Properties.ContainsKey("fingerprintResponse"));
+    }
+
+    [Fact]
+    public void MissingFingerprint_LogsUnavailableSizeAndRatio()
+    {
+        var logger = new CapturingLogger();
+        new LoggingResponseAnalysisSink(logger).Report(new ResponseAnalysis("GET /news",
+            CacheRecommendation.PayloadTooLarge, 4000000, TimeSpan.Zero, null));
+        Assert.Null(logger.Properties["FingerprintBytes"]);
+        Assert.Null(logger.Properties["PayloadToFingerprintRatio"]);
     }
 
     [Theory]

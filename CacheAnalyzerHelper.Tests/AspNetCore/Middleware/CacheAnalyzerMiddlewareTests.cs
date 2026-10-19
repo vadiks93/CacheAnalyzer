@@ -17,7 +17,7 @@ using Microsoft.Extensions.Options;
 
 namespace CacheAnalyzerHelper.Tests.AspNetCore.Middleware;
 
-public sealed class CacheAnalyzerMiddlewareTests
+public sealed partial class CacheAnalyzerMiddlewareTests
 {
     private const string ResponseJson = "{\"id\":42,\"name\":\"cached value\"}";
 

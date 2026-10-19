@@ -7,5 +7,8 @@ public enum CacheRecommendation
     ResponseChanged,
     PayloadTooLarge,
     FingerprintTooSlow,
-    InsufficientTraffic
+    InsufficientTraffic,
+    /// <summary>Included JSON data was stable; excluded metadata may still change.
+    /// Does not establish whole-response cacheability.</summary>
+    StableDataCandidate
 }

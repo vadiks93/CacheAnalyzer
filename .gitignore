@@ -35,3 +35,6 @@ Thumbs.db
 
 
 .fake
+
+# Local AI session recaps
+/ai/sessions/

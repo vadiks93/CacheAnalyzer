@@ -1,4 +1,5 @@
 using CacheAnalyzer.AspNetCore.IO;
+using CacheAnalyzer.AspNetCore.Services;
 using CacheAnalyzer.AspNetCore.Services.Runtime;
 using CacheAnalyzer.Core.Models;
 using CacheAnalyzer.Core.Options;
@@ -142,7 +143,15 @@ internal sealed class CacheAnalyzerMiddleware
 
             var responseBytes = bufferedBody.ToArray();
             var stopwatch = Stopwatch.StartNew();
-            var fingerprint = fingerprintProvider.CreateFingerprint(responseBytes);
+            var fingerprintInput = responseBytes;
+            var comparison = "ExactBytes";
+            var ignoredPaths = context.GetEndpoint()?.Metadata.GetMetadata<CacheAnalyzeAttribute>()?.IgnoreJsonPaths;
+            if (ignoredPaths is { Length: > 0 })
+            {
+                comparison = JsonFingerprintInput.TryNormalize(responseBytes, context.Response, ignoredPaths, out fingerprintInput)
+                    ? "JsonExclusionsApplied" : "JsonExclusionsNotApplied";
+            }
+            var fingerprint = fingerprintProvider.CreateFingerprint(fingerprintInput);
             stopwatch.Stop();
 
             if (stopwatch.Elapsed > options.MaximumFingerprintDuration)
@@ -174,6 +183,7 @@ internal sealed class CacheAnalyzerMiddleware
                         responseBytes.LongLength,
                         stopwatch.Elapsed,
                         fingerprint,
+                        fingerprintComparison: comparison,
                         includeFingerprintInLogs: includeFingerprintInLogs,
                         endpoint: endpoint,
                         includeFullRequestKeyInLogs: includeFullRequestKeyInLogs));
@@ -185,22 +195,24 @@ internal sealed class CacheAnalyzerMiddleware
             // Shutdown may overlap; the finally block releases any late observations.
             var historyResult = history.Observe(
                 requestId,
-                fingerprint,
+                comparison == "ExactBytes" ? fingerprint : comparison + ":" + fingerprint,
                 responseBytes.LongLength,
                 DateTimeOffset.UtcNow,
                 options);
             var analysis = new ResponseAnalysis(
                     requestKey,
-                    historyResult.Recommendation,
+                    historyResult.Recommendation == CacheRecommendation.CacheCandidate && comparison == "JsonExclusionsApplied"
+                        ? CacheRecommendation.StableDataCandidate : historyResult.Recommendation,
                     responseBytes.LongLength,
                     stopwatch.Elapsed,
                     fingerprint,
+                    fingerprintComparison: comparison,
                     includeFingerprintInLogs: includeFingerprintInLogs,
                     endpoint: endpoint,
                     includeFullRequestKeyInLogs: includeFullRequestKeyInLogs);
             // Other requests may already be analyzing this key. Preserve and report
             // only its first candidate finding; no requests wait for one another.
-            if (analysis.Recommendation != CacheRecommendation.CacheCandidate ||
+            if (analysis.Recommendation is not (CacheRecommendation.CacheCandidate or CacheRecommendation.StableDataCandidate) ||
                 (!IsAnalysisStopped() && _cacheableCandidates.TryAdd(analysis)))
             {
                 Report(sinks, logger, analysis);

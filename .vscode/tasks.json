@@ -2,6 +2,18 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "build MinimalApiWithCacheDetection",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/samples/MinimalApiWithCacheDetection/MinimalApiWithCacheDetection.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
       "label": "build CacheAnalyzer.Sample.AspNetCore",
       "type": "process",
       "command": "dotnet",
@@ -26,19 +38,6 @@
       "problemMatcher": "$msCompile"
     },
     {
-      "label": "build CacheAnalyzerHelper.Tests (LamaDebug)",
-      "type": "process",
-      "command": "dotnet",
-      "args": [
-        "build",
-        "${workspaceFolder}/CacheAnalyzerHelper.Tests/CacheAnalyzerHelper.Tests.csproj",
-        "--configuration",
-        "LamaDebug",
-        "--disable-build-servers"
-      ],
-      "problemMatcher": "$msCompile"
-    },
-    {
       "label": "build CacheAnalyzerHelper.Tests",
       "type": "process",
       "command": "dotnet",
@@ -53,6 +52,55 @@
         "kind": "build",
         "isDefault": true
       }
+    },
+    {
+      "label": "build MinimalApiWithCacheDetection (Release)",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/samples/MinimalApiWithCacheDetection/MinimalApiWithCacheDetection.csproj",
+        "--configuration",
+        "Release"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "build CacheAnalyzer.Sample.AspNetCore (Release)",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/samples/CacheAnalyzer.Sample.AspNetCore/CacheAnalyzer.Sample.AspNetCore.csproj",
+        "--configuration",
+        "Release"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "build CacheAnalyzer.Sample.NetFramework (Release)",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/samples/CacheAnalyzer.Sample.NetFramework/CacheAnalyzer.Sample.NetFramework.csproj",
+        "--configuration",
+        "Release"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "build CacheAnalyzerHelper.Tests (Release)",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/CacheAnalyzerHelper.Tests/CacheAnalyzerHelper.Tests.csproj",
+        "--configuration",
+        "Release",
+        "--disable-build-servers"
+      ],
+      "problemMatcher": "$msCompile"
     }
   ]
 }

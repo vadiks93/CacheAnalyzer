@@ -2,6 +2,22 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": ".NET: Debug sample Minimal API",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build MinimalApiWithCacheDetection",
+      "program": "${workspaceFolder}/samples/MinimalApiWithCacheDetection/bin/Debug/net10.0/MinimalApiWithCacheDetection.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/samples/MinimalApiWithCacheDetection",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "https://localhost:7168;http://localhost:5254"
+      },
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false
+    },
+    {
       "name": ".NET: Debug sample ASP.NET Core API",
       "type": "coreclr",
       "request": "launch",
@@ -26,18 +42,6 @@
       "justMyCode": false
     },
     {
-      "name": ".NET: Debug woven test code (LamaDebug)",
-      "type": "coreclr",
-      "request": "launch",
-      "preLaunchTask": "build CacheAnalyzerHelper.Tests (LamaDebug)",
-      "program": "${workspaceFolder}/CacheAnalyzerHelper.Tests/bin/LamaDebug/net10.0/CacheAnalyzerHelper.Tests.dll",
-      "args": [],
-      "cwd": "${workspaceFolder}/CacheAnalyzerHelper.Tests",
-      "console": "integratedTerminal",
-      "stopAtEntry": false,
-      "justMyCode": false
-    },
-    {
       "name": ".NET: Debug CacheAnalyzerHelper.Tests",
       "type": "coreclr",
       "request": "launch",
@@ -48,6 +52,59 @@
       "console": "integratedTerminal",
       "stopAtEntry": false,
       "justMyCode": false
+    },
+    {
+      "name": ".NET: Release sample Minimal API (no debugger)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build MinimalApiWithCacheDetection (Release)",
+      "program": "${workspaceFolder}/samples/MinimalApiWithCacheDetection/bin/Release/net10.0/MinimalApiWithCacheDetection.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/samples/MinimalApiWithCacheDetection",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Production",
+        "ASPNETCORE_URLS": "https://localhost:7168;http://localhost:5254",
+        "DOTNET_ENVIRONMENT": "Production"
+      },
+      "console": "integratedTerminal",
+      "noDebug": true
+    },
+    {
+      "name": ".NET: Release sample ASP.NET Core API (no debugger)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzer.Sample.AspNetCore (Release)",
+      "program": "${workspaceFolder}/samples/CacheAnalyzer.Sample.AspNetCore/bin/Release/net10.0/CacheAnalyzer.Sample.AspNetCore.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/samples/CacheAnalyzer.Sample.AspNetCore",
+      "console": "integratedTerminal",
+      "noDebug": true,
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Production",
+        "DOTNET_ENVIRONMENT": "Production"
+      }
+    },
+    {
+      "name": ".NET Framework: Release sample API (no debugger)",
+      "type": "clr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzer.Sample.NetFramework (Release)",
+      "program": "${workspaceFolder}/samples/CacheAnalyzer.Sample.NetFramework/bin/Release/net48/CacheAnalyzer.Sample.NetFramework.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/samples/CacheAnalyzer.Sample.NetFramework",
+      "console": "integratedTerminal",
+      "noDebug": true
+    },
+    {
+      "name": ".NET: Release CacheAnalyzerHelper.Tests (no debugger)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build CacheAnalyzerHelper.Tests (Release)",
+      "program": "${workspaceFolder}/CacheAnalyzerHelper.Tests/bin/Release/net10.0/CacheAnalyzerHelper.Tests.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/CacheAnalyzerHelper.Tests",
+      "console": "integratedTerminal",
+      "noDebug": true
     }
   ]
 }

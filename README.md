@@ -1,21 +1,20 @@
 # CacheAnalyzer
 
-CacheAnalyzer identifies caching opportunities in ASP.NET Core MVC controllers and Minimal APIs by comparing generated response payloads across requests. Findings are advisory: the library does not cache responses, skip endpoint execution, emit ETags, or change HTTP headers, status codes, or bodies.
+Find caching opportunities in ASP.NET Core MVC and Minimal APIs by comparing response payloads. Analysis is advisory: CacheAnalyzer does not cache responses, emit ETags, or change HTTP headers, status codes, or bodies.
 
-Licensed under the [MIT License](LICENSE). The ASP.NET Core package targets .NET 10.
+Targets .NET 10. Licensed under [MIT](LICENSE).
 
 ## Quick start
-
-Install the package from NuGet:
 
 ```shell
 dotnet add package CacheAnalyzer.AspNetCore
 ```
 
-Register the services and place the middleware after routing in `Program.cs`:
+Register services and place the middleware after routing:
 
 ```csharp
 using CacheAnalyzer.AspNetCore.Extensions;
+using CacheAnalyzerHelper.Attributes;
 
 builder.Services.AddCacheAnalyzer();
 builder.Services.AddControllers();
@@ -24,139 +23,64 @@ var app = builder.Build();
 app.UseRouting();
 app.UseCacheAnalyzer();
 app.MapControllers();
+app.MapGet("/products/{id:int}", (int id) => repository.Get(id))
+   .WithMetadata(new CacheAnalyzeAttribute());
 app.Run();
 ```
 
-Opt in individual controller actions with `[CacheAnalyze]`:
+For controllers, add `[CacheAnalyze]` to individual actions. By default, only marked GET and QUERY endpoints returning **200 OK** are analyzed; `Cache-Control: no-store` responses are ignored. Different URLs/query strings have separate histories. QUERY identities also include body and content metadata; buffered bodies are rewound before endpoint execution.
+
+## Partial data stability
+
+Exclude volatile fields from internal JSON comparison with explicit JSON Pointer paths:
 
 ```csharp
-using CacheAnalyzerHelper.Attributes;
-
-[HttpGet("{id:int}")]
-[CacheAnalyze]
-public Product Get(int id) => repository.Get(id);
+app.MapGet("/news", [CacheAnalyze(IgnoreJsonPaths = new[] { "/request_id" })]
+    () => GetNews());
 ```
 
-For Minimal APIs, attach the same metadata:
+This leaves the complete response untouched. `/request_id` selects a root property; `/metadata/request_id` selects a nested property. Paths are case-sensitive and have no wildcards. No fields are excluded automatically.
 
-```csharp
-app.MapGet("/products/{id:int}", (int id) => repository.Get(id))
-   .WithMetadata(new CacheAnalyzeAttribute());
-```
+Eligible JSON is normalized by removing selected fields, sorting object properties, and removing insignificant whitespace. Array order and value types remain significant. Unsupported or invalid input falls back to exact-byte comparison; logs identify the comparison mode.
 
-Only GET and QUERY requests with a **200 OK** response are analyzed. All other status codes, including 201, 204, 206, 404, and 500, are ignored even if their payload matches a 200 response. Responses with `Cache-Control: no-store` are also ignored. HEAD and other methods bypass analysis.
-
-Different URLs and query strings have separate histories. QUERY identities also include the request-body hash and content metadata; the body is buffered and rewound before the endpoint runs.
+When the included data matches enough retained observations, the result is **`StableDataCandidate`, logged as `cacheable=partial`**. This suggests caching stable data while regenerating request-specific fields; it does not establish that the full response can be replayed. Without exclusions, comparison uses complete response bytes.
 
 ## Configuration
 
-Configure options at registration, or bind them to a reloadable `CacheAnalyzer` configuration section:
+Defaults require 10 matching observations within four hours and a payload-to-fingerprint ratio of at least 10. Response capture is limited to 3 MiB; fingerprints taking more than 80 ms are excluded.
 
 ```csharp
-using CacheAnalyzer.Core.Models;
-using CacheAnalyzer.Core.Options;
-
 builder.Services.AddCacheAnalyzer(options =>
 {
-    options.EndpointSelection = EndpointSelectionMode.AllGetAndQueryRequests;
-    options.MaximumPayloadBytes = 1024 * 1024;
     options.MinimumObservationsPerKey = 10;
+    options.MaximumPayloadBytes = 1024 * 1024;
 });
-
-// Alternatively, register defaults and bind configuration:
-// builder.Services.AddCacheAnalyzer();
-// builder.Services.Configure<CacheAnalysisOptions>(
-//     builder.Configuration.GetSection("CacheAnalyzer"));
 ```
 
-`AttributedEndpoints` is the default selection mode. Choose `AllGetAndQueryRequests` to include unmarked GET and QUERY endpoints.
+Use `EndpointSelectionMode.AllGetAndQueryRequests` to include unmarked endpoints, or bind `CacheAnalysisOptions` to configuration for runtime changes. See the [configuration reference](docs/analysis-reference.md#configuration) for all options, capacity limits, and runtime controls.
 
-| Option                                  | Default | Purpose                                                                                              |
-| --------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `Enabled`                               | `true`  | Enable or temporarily disable analysis.                                                              |
-| `MaximumPayloadBytes`                   | 3 MiB   | Maximum response size eligible for fingerprinting.                                                   |
-| `MaximumFingerprintDuration`            | 25 ms   | Exclude requests whose completed fingerprint generation exceeds this duration.                       |
-| `MinimumObservationsPerKey`             | 10      | Matching observations needed before recommending a candidate.                                        |
-| `MaximumObservationsPerKey`             | 1,000   | Retained observations per request identity; keep at least the minimum above.                         |
-| `ObservationWindow`                     | 4 hours | Time window used to evaluate retained observations.                                                  |
-| `MinimumPayloadToFingerprintRatio`      | 10      | Minimum payload size relative to the fingerprint size for a candidate.                               |
-| `MaximumDistinctRequests`               | 350     | Distinct observed request identities before analysis stops.                                          |
-| `MaximumCacheCandidates`                | 200     | Candidate capacity; exceeding it stops analysis.                                                     |
-| `MaximumSlowFingerprintRequests`        | 500     | Slow request groups before analysis stops: each GET origin/path or exact QUERY identity counts once. |
-| `MaximumSlowFingerprintRequestsPerPath` | 500     | Distinct slow GET query variants before excluding the entire origin/path.                            |
-| `IncludeFingerprintInLogs`              | `false` | Include response fingerprints in default logs.                                                       |
-| `IncludeFullRequestKeyInLogs`           | `false` | Retain and log full request details, including URL/query values.                                     |
+## Findings
 
-Capacity limits and retention are best effort under concurrency; in-flight requests may finish and temporarily exceed limits. Recommendations use point-in-time observations without application-level locking. Concurrent collections may synchronize internally.
+The default sink uses the application's `ILogger` providers:
 
-Capacity shutdown clears observation history and slow exclusions, but preserves candidate findings. Restart the application with fresh analysis services to begin another run; increasing limits or toggling `Enabled` does not reset a stopped run. A slow fingerprint excludes its request identity from later analysis; the duration limit does not interrupt hashing already in progress.
+| Recommendation | `cacheable` | Meaning |
+| --- | --- | --- |
+| `CacheCandidate` | `1` | Complete response bytes match and thresholds qualify. |
+| `StableDataCandidate` | `partial` | Included JSON data matches after explicit exclusions. |
+| `ResponseChanged` | `0` | Compared response data differs. |
+| `PayloadTooLarge` / `FingerprintTooSlow` | `0` | Analysis exceeded a configured limit. |
+| `FirstObservation` / `InsufficientTraffic` | `unknown` | More observations are needed. |
 
-To temporarily disable or re-enable analysis at runtime:
+Candidates and size/duration findings log at Information; changed and pending findings log at Debug. Events include comparison mode, payload size, fingerprint duration, and payload-to-fingerprint ratio. Full URLs and fingerprint values are omitted by default.
 
-```csharp
-using CacheAnalyzer.AspNetCore.Services.Runtime;
+Once recorded, a candidate bypasses further analysis for that request identity. Findings are historical, held in memory, and not revalidated. Restart the application to begin a fresh run. Capacity shutdown also requires a fresh run; toggling analysis or increasing limits does not reset it.
 
-var control = app.Services.GetRequiredService<ICacheAnalyzerRuntimeControl>();
-control.Disable();
-control.Enable();
-```
+## Limits and privacy
 
-## Findings and logging
+Buffering, copying, JSON normalization, hashing, and logging add allocation and timing overhead. Prefer finite responses; streaming, server-sent events, large downloads, and explicit response-body features require compatibility checks. The response-size limit is not a total memory limit or a QUERY buffering limit.
 
-The default sink writes structured events through the application's existing `ILogger` providers:
+History retention and capacity are best effort under concurrency. Analysis uses concurrent collections and point-in-time snapshots without application-level locking; those collections may synchronize internally.
 
-| Recommendation                             | `Cacheable` | Meaning                                                                         |
-| ------------------------------------------ | ----------- | ------------------------------------------------------------------------------- |
-| `CacheCandidate`                           | `1`         | Enough retained responses match and the payload-to-fingerprint ratio qualifies. |
-| `ResponseChanged`                          | `0`         | Response bytes differ.                                                          |
-| `PayloadTooLarge` / `FingerprintTooSlow`   | `0`         | Analysis exceeded the configured size or duration limit.                        |
-| `FirstObservation` / `InsufficientTraffic` | `unknown`   | More observations are needed.                                                   |
+Built-in analysis has no outbound transport. Logging providers and custom sinks may export data; full-request logging can disclose sensitive values. Fingerprints are not encryption or guaranteed anonymization, and temporary QUERY buffering files may contain request data.
 
-Candidate, oversized, and slow-fingerprint events use Information; changed and pending findings use Debug. These values describe analysis results, not HTTP caching directives. Ignored responses produce no analysis findings.
-
-Events include `Endpoint` (method and route template), `fingerprintRequest` (hashed request identity), `Cacheable`, `Recommendation`, `PayloadBytes`, `FingerprintMilliseconds`, and `TrackingCapacityReached`. Full URLs and response fingerprints are omitted by default. Either logging option can also be enabled per endpoint with `[CacheAnalyze(IncludeFingerprintInLogs = true, IncludeFullRequestKeyInLogs = true)]`, or equivalent Minimal API metadata. Global and endpoint opt-ins are additive.
-
-The analyzer logs an initial start, capacity shutdown, and request-observed temporary stop/resume transitions. Timestamps and output format depend on your logging provider. For JSON console output with UTC timestamps and all analysis events:
-
-```json
-{
-  "Logging": {
-    "Console": {
-      "FormatterName": "json",
-      "FormatterOptions": {
-        "TimestampFormat": "yyyy-MM-ddTHH:mm:ss.fffZ",
-        "UseUtcTimestamp": true
-      }
-    },
-    "LogLevel": {
-      "CacheAnalyzer.AspNetCore.Services.Reporting.LoggingResponseAnalysisSink": "Debug"
-    }
-  }
-}
-```
-
-Read the retained candidate findings through dependency injection:
-
-```csharp
-using CacheAnalyzer.Core.Services.Candidates;
-
-var candidates = app.Services.GetRequiredService<CacheCandidateStore>().GetSnapshot();
-```
-
-A candidate is reported once, then its request identity bypasses further response analysis. Findings are historical and are not revalidated when later payloads or status codes change. Restart analysis after relevant application/data changes. Findings are in memory and do not survive restarts.
-
-For custom reporting, implement `IResponseAnalysisSink` from `CacheAnalyzer.Core.Services.Reporting` and register it with `builder.Services.AddSingleton<IResponseAnalysisSink, YourSink>();`. Your sink receives `ResponseAnalysis` from `CacheAnalyzer.Core.Models` and controls its own data disclosure.
-
-## Practical limits and privacy
-
-Prefer ordinary, finite responses with small payloads. Response forwarding preserves content, but capturing copies, buffering QUERY bodies, hashing, and reporting add allocation and timing overhead. `MaximumPayloadBytes` bounds the ASP.NET Core response capture per request; it is not a total memory limit or a QUERY buffering limit. The .NET Framework sample checks response size after buffering.
-
-Avoid indefinite streaming, server-sent events, large downloads, and endpoints requiring prompt flushed delivery. Fingerprinting requires a completed response and can delay request completion. Explicit response start/completion, file sending, custom response-body features, and middleware ordering may require compatibility checks in your pipeline. Synchronous writes remain subject to the server's synchronous-I/O policy.
-
-Comparison is byte-for-byte. Timestamps, random IDs, and randomized payload encryption can change fingerprints even when business data is stable. Randomized QUERY bodies also create separate identities. The analyzer does not normalize fields or decrypt payloads; HTTPS transport encryption does not affect this comparison.
-
-Built-in analysis has no outbound transport. Fingerprints and history stay in the host process unless logging providers or custom services export them. SHA-256 fingerprints are not encryption or guaranteed anonymization. Full request logging can disclose sensitive query values; route templates can also contain sensitive literals. Dumps, paging, and temporary QUERY buffering files may contain analysis/request data; clearing buffers does not securely erase it.
-
-## Samples and publishing
-
-See [samples](samples/README.md) for runnable ASP.NET Core and .NET Framework 4.8 Web API examples. Outbound `HttpClient` and internal service calls are outside the current scope.
+See [analysis details](docs/analysis-reference.md) for JSON fallback rules, logging setup, metrics, custom reporting, and compatibility limits. Runnable examples are in [samples](samples/README.md), including the [local news simulation](samples/MinimalApiWithCacheDetection/README.md). The .NET Framework sample uses exact-byte comparison; outbound HTTP clients and internal service calls are outside the analyzer's scope.

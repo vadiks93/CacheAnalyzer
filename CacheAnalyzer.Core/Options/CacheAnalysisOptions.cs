@@ -27,7 +27,7 @@ public sealed class CacheAnalysisOptions
     /// </summary>
     public long MaximumPayloadBytes { get; set; } = 1024 * 1024 * 3;
 
-    public TimeSpan MaximumFingerprintDuration { get; set; } = TimeSpan.FromMilliseconds(25);
+    public TimeSpan MaximumFingerprintDuration { get; set; } = TimeSpan.FromMilliseconds(80);
 
     /// <summary>
     /// Maximum distinct slow GET query variants per origin/path, default 500.
